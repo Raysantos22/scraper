@@ -62,11 +62,14 @@ function OverrideBadge() {
   )
 }
 
-function SummaryCard({ label, value }) {
+function SummaryCard({ label, value, loading }) {
   return (
     <div className="flex-1 min-w-0 bg-gray-50 rounded-lg px-4 py-3">
       <p className="text-xs text-gray-400 mb-1">{label}</p>
-      <p className="text-xl font-medium text-gray-900">{value}</p>
+      {loading
+        ? <div className="h-7 w-20 bg-gray-200 rounded animate-pulse" />
+        : <p className="text-xl font-medium text-gray-900">{value}</p>
+      }
     </div>
   )
 }
@@ -261,7 +264,7 @@ function PriceDropdown({ mode, value, onChange }) {
   )
 }
 
-// ─── Inline variant rows (table expand) ──────────────────────────────────────
+// ─── Inline variant rows ──────────────────────────────────────────────────────
 function VariantRows({ productId, onSelect }) {
   const [variants, setVariants] = useState(null)
   useEffect(() => {
@@ -288,7 +291,7 @@ function VariantRows({ productId, onSelect }) {
         <td className="py-2.5 pl-3 pr-2">
           <div className="flex justify-end">
             {vImg
-              ? <img src={vImg} alt="" className="w-7 h-7 rounded-md object-cover border border-blue-100/60" />
+              ? <img src={vImg} alt="" className="w-7 h-7 rounded-md object-cover border border-blue-100/60" loading="lazy" />
               : <div className="w-7 h-7 rounded-md bg-blue-100/50 border border-blue-100 flex items-center justify-center text-[8px] font-bold text-blue-400">V</div>
             }
           </div>
@@ -321,21 +324,39 @@ function freshnessRowClass(updatedAt) {
   return 'bg-red-50/80'
 }
 
+// ─── Module-level stats cache ─────────────────────────────────────────────────
+// Lives outside the component so it persists across re-mounts within the same
+// browser session (e.g. switching tabs and back). Reset on full page reload.
+const STATS_CACHE = {
+  ready:      false,
+  total:      0,
+  inStock:    0,
+  outStock:   0,
+  avgPrice:   '0.00',
+  totalItems: 0,   // products + variants
+}
+
 // ─── Main Tab ─────────────────────────────────────────────────────────────────
 export default function ProductsTab() {
   const [editingId, setEditingId]             = useState(null)
   const [products, setProducts]               = useState([])
   const [suppliers, setSuppliers]             = useState({})
-  const [suppliersLoaded, setSuppliersLoaded] = useState(false)
   const [loading, setLoading]                 = useState(true)
+
+  // If cache already warm, skip the loading shimmer for stats immediately
+  const [statsLoading, setStatsLoading]       = useState(!STATS_CACHE.ready)
+
   const [view, setView]                       = useState('table')
   const [exporting, setExporting]             = useState(false)
   const [expandedRows, setExpandedRows]       = useState(new Set())
   const [filterFreshness, setFilterFreshness] = useState('')
-  const [totalCount, setTotalCount]           = useState(0)
-  const [inStockCount, setInStockCount]       = useState(0)
-  const [outStockCount, setOutStockCount]     = useState(0)
-  const [avgPrice, setAvgPrice]               = useState('0.00')
+
+  // Seed from cache so first paint shows real numbers (if already loaded)
+  const [totalCount, setTotalCount]           = useState(STATS_CACHE.total)
+  const [inStockCount, setInStockCount]       = useState(STATS_CACHE.inStock)
+  const [outStockCount, setOutStockCount]     = useState(STATS_CACHE.outStock)
+  const [avgPrice, setAvgPrice]               = useState(STATS_CACHE.avgPrice)
+  const [totalItems, setTotalItems]           = useState(STATS_CACHE.totalItems)
   const [overrideSkus, setOverrideSkus]       = useState(new Set())
 
   const [page, setPage]                       = useState(0)
@@ -354,7 +375,9 @@ export default function ProductsTab() {
   const [sortDir, setSortDir]                 = useState('desc')
   const [categories, setCategories]           = useState([])
   const [supplierOptions, setSupplierOptions] = useState([])
-  const globalStats = useRef({ total: 0, inStock: 0, outStock: 0, avgPrice: '0.00' })
+
+  // Sequence counter — discard stale responses if a newer fetch has started
+  const fetchSeq = useRef(0)
 
   function toggleExpand(e, productId) {
     e.stopPropagation()
@@ -365,75 +388,66 @@ export default function ProductsTab() {
     })
   }
 
-  // Load metadata once
+  // ── Load metadata in parallel with first page fetch ───────────────────────
+  // No longer gates fetchPage. Both fire on mount simultaneously.
   useEffect(() => {
     async function loadMeta() {
-      const { data: supps } = await supabase.from('suppliers').select('*')
+      const [{ data: supps }, { data: cats }, { data: ovRows }] = await Promise.all([
+        supabase.from('suppliers').select('*'),
+        supabase.from('products').select('category').not('category', 'is', null),
+        supabase.from('product_overrides').select('sku'),
+      ])
+
       const suppMap = {}
       supps?.forEach(s => { suppMap[s.supplier_id] = s })
       setSuppliers(suppMap)
       setSupplierOptions(supps?.map(s => ({ id: String(s.supplier_id), name: s.supplier_name })) || [])
-      setSuppliersLoaded(true)
-
-      const { data: cats } = await supabase.from('products').select('category').not('category', 'is', null)
       setCategories([...new Set(cats?.map(r => r.category).filter(Boolean))].sort())
-
-      const [{ count: total }, { count: inStock }, { count: outStock }] = await Promise.all([
-        supabase.from('products').select('*', { count: 'exact', head: true }),
-        supabase.from('products').select('*', { count: 'exact', head: true }).gt('stock', 0),
-        supabase.from('products').select('*', { count: 'exact', head: true }).eq('stock', 0),
-      ])
-      setTotalCount(total || 0)
-      setInStockCount(inStock || 0)
-      setOutStockCount(outStock || 0)
-
-      const { data: priceRows } = await supabase.from('products').select('price')
-      if (priceRows?.length) {
-        const avg = priceRows.reduce((a, b) => a + parseFloat(b.price || 0), 0) / priceRows.length
-        setAvgPrice(avg.toFixed(2))
-        globalStats.current = { total: total || 0, inStock: inStock || 0, outStock: outStock || 0, avgPrice: avg.toFixed(2) }
-      }
-
-      const { data: ovRows } = await supabase.from('product_overrides').select('sku')
       if (ovRows?.length) setOverrideSkus(new Set(ovRows.map(r => r.sku)))
     }
     loadMeta()
   }, [])
 
-  // Debounce search
+  // Debounce search input
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput), 400)
     return () => clearTimeout(t)
   }, [searchInput])
 
-  // Reset page on filter change
+  // Reset to page 0 whenever any filter/sort changes
   useEffect(() => {
     setPage(0)
   }, [search, filterCategory, filterStock, filterSupplier,
       filterMinQty, filterMinPrice, filterMaxPrice, filterFreshness, sortBy, sortDir])
 
+  const hasFilters = !!(filterCategory || filterStock || filterSupplier || search ||
+    filterMinQty || filterMinPrice || filterMaxPrice || filterFreshness)
+
+  // Reusable filter builder — appends all active filters to a query
+  const buildFilterQuery = useCallback((q) => {
+    if (search)         q = q.or(`title.ilike.%${search}%,sku.ilike.%${search}%,brand.ilike.%${search}%`)
+    if (filterCategory) q = q.eq('category', filterCategory)
+    if (filterStock === 'in')  q = q.gt('stock', 0)
+    if (filterStock === 'out') q = q.eq('stock', 0)
+    if (filterStock === 'low') q = q.gt('stock', 0).lt('stock', 50)
+    if (filterSupplier) q = q.eq('supplier_id', filterSupplier)
+    if (filterMinQty   !== '') q = q.gte('stock', parseInt(filterMinQty))
+    if (filterMinPrice !== '') q = q.gte('price', parseFloat(filterMinPrice))
+    if (filterMaxPrice !== '') q = q.lte('price', parseFloat(filterMaxPrice))
+    const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString()
+    if (filterFreshness === 'Updated within last 24hrs') q = q.gte('updated_at', daysAgo(1))
+    if (filterFreshness === '1-7 days') q = q.lt('updated_at', daysAgo(1)).gte('updated_at', daysAgo(7))
+    if (filterFreshness === 'Older than 7 days') q = q.lt('updated_at', daysAgo(7))
+    return q
+  }, [search, filterCategory, filterStock, filterSupplier,
+      filterMinQty, filterMinPrice, filterMaxPrice, filterFreshness])
+
   const fetchPage = useCallback(async () => {
-    if (!suppliersLoaded) return
+    const seq = ++fetchSeq.current
     setLoading(true)
 
-    function applyFilters(q) {
-      if (search)         q = q.or(`title.ilike.%${search}%,sku.ilike.%${search}%,brand.ilike.%${search}%`)
-      if (filterCategory) q = q.eq('category', filterCategory)
-      if (filterStock === 'in')  q = q.gt('stock', 0)
-      if (filterStock === 'out') q = q.eq('stock', 0)
-      if (filterStock === 'low') q = q.gt('stock', 0).lt('stock', 50)
-      if (filterSupplier) q = q.eq('supplier_id', filterSupplier)
-      if (filterMinQty   !== '') q = q.gte('stock', parseInt(filterMinQty))
-      if (filterMinPrice !== '') q = q.gte('price', parseFloat(filterMinPrice))
-      if (filterMaxPrice !== '') q = q.lte('price', parseFloat(filterMaxPrice))
-      const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString()
-      if (filterFreshness === 'Updated within last 24hrs') q = q.gte('updated_at', daysAgo(1))
-      if (filterFreshness === '1-7 days') q = q.lt('updated_at', daysAgo(1)).gte('updated_at', daysAgo(7))
-      if (filterFreshness === 'Older than 7 days') q = q.lt('updated_at', daysAgo(7))
-      return q
-    }
-
-    const { data, count, error } = await applyFilters(
+    // ── Phase 1: Fetch visible page rows — no supplier gate, fires immediately
+    const { data, count, error } = await buildFilterQuery(
       supabase.from('products').select(
         'product_id,sku,title,price,stock,category,brand,images,supplier_id,product_type,updated_at',
         { count: 'exact' }
@@ -442,40 +456,77 @@ export default function ProductsTab() {
       .order(sortBy, { ascending: sortDir === 'asc' })
       .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
 
+    if (seq !== fetchSeq.current) return   // stale — discard
+
     if (!error) {
       setProducts(data || [])
       setFilteredCount(count || 0)
     }
+    setLoading(false)  // rows visible NOW; stats may still be loading
 
-    const hasFilters = search || filterCategory || filterStock || filterSupplier ||
-      filterMinQty || filterMinPrice || filterMaxPrice || filterFreshness
-
-    if (hasFilters) {
-      const [{ count: total }, { count: inStock }, { count: outStock }] = await Promise.all([
-        applyFilters(supabase.from('products').select('*', { count: 'exact', head: true })),
-        applyFilters(supabase.from('products').select('*', { count: 'exact', head: true })).gt('stock', 0),
-        applyFilters(supabase.from('products').select('*', { count: 'exact', head: true })).eq('stock', 0),
-      ])
-      setTotalCount(total || 0)
-      setInStockCount(inStock || 0)
-      setOutStockCount(outStock || 0)
-
-      const { data: priceRows } = await applyFilters(supabase.from('products').select('price'))
-      if (priceRows?.length) {
-        const avg = priceRows.reduce((a, b) => a + parseFloat(b.price || 0), 0) / priceRows.length
-        setAvgPrice(avg.toFixed(2))
-      } else {
-        setAvgPrice('0.00')
-      }
-    } else {
-      setTotalCount(globalStats.current.total)
-      setInStockCount(globalStats.current.inStock)
-      setOutStockCount(globalStats.current.outStock)
-      setAvgPrice(globalStats.current.avgPrice)
+    // ── Phase 2: Stats — use module-level cache when no filters active ────────
+    if (!hasFilters && STATS_CACHE.ready) {
+      // Cache is warm — paint instantly, zero extra queries
+      setTotalCount(STATS_CACHE.total)
+      setInStockCount(STATS_CACHE.inStock)
+      setOutStockCount(STATS_CACHE.outStock)
+      setAvgPrice(STATS_CACHE.avgPrice)
+      setTotalItems(STATS_CACHE.totalItems)
+      setStatsLoading(false)
+      return
     }
-    setLoading(false)
-  }, [suppliersLoaded, search, filterCategory, filterStock, filterSupplier,
-      filterMinQty, filterMinPrice, filterMaxPrice, filterFreshness, sortBy, sortDir, page])
+
+    setStatsLoading(true)
+
+    const base = hasFilters ? buildFilterQuery : (q => q)
+
+    // Run all stat queries in parallel
+    const [
+      { count: total },
+      { count: inStock },
+      { count: outStock },
+      { data: priceRows },
+      { count: variantCount },
+    ] = await Promise.all([
+      base(supabase.from('products').select('*', { count: 'exact', head: true })),
+      base(supabase.from('products').select('*', { count: 'exact', head: true })).gt('stock', 0),
+      base(supabase.from('products').select('*', { count: 'exact', head: true })).eq('stock', 0),
+      base(supabase.from('products').select('price')),
+      // Variant count — unfiltered uses full table; filtered uses base product ids
+      // For simplicity use the full variant table count (unfiltered only; else product count)
+      hasFilters
+        ? Promise.resolve({ count: 0 })
+        : supabase.from('variants').select('*', { count: 'exact', head: true }),
+    ])
+
+    if (seq !== fetchSeq.current) return   // stale — discard
+
+    const avg = priceRows?.length
+      ? (priceRows.reduce((a, b) => a + parseFloat(b.price || 0), 0) / priceRows.length).toFixed(2)
+      : '0.00'
+
+    const ti = hasFilters
+      ? (total || 0)                          // filtered: just show matching products
+      : (total || 0) + (variantCount || 0)    // global: products + all variants
+
+    // Write through to module-level cache when no filters
+    if (!hasFilters) {
+      STATS_CACHE.ready      = true
+      STATS_CACHE.total      = total      || 0
+      STATS_CACHE.inStock    = inStock    || 0
+      STATS_CACHE.outStock   = outStock   || 0
+      STATS_CACHE.avgPrice   = avg
+      STATS_CACHE.totalItems = ti
+    }
+
+    setTotalCount(total      || 0)
+    setInStockCount(inStock  || 0)
+    setOutStockCount(outStock || 0)
+    setAvgPrice(avg)
+    setTotalItems(ti)
+    setStatsLoading(false)
+
+  }, [buildFilterQuery, sortBy, sortDir, page, hasFilters])
 
   useEffect(() => { fetchPage() }, [fetchPage])
 
@@ -497,17 +548,10 @@ export default function ProductsTab() {
     )
   }
 
-  const hasFilters = filterCategory || filterStock || filterSupplier || search ||
-    filterMinQty || filterMinPrice || filterMaxPrice || filterFreshness
-
   function clearFilters() {
     setFilterCategory(''); setFilterStock(''); setFilterSupplier('')
     setSearchInput(''); setSearch(''); setFilterMinQty('')
     setFilterMinPrice(''); setFilterMaxPrice(''); setFilterFreshness('')
-    setTotalCount(globalStats.current.total)
-    setInStockCount(globalStats.current.inStock)
-    setOutStockCount(globalStats.current.outStock)
-    setAvgPrice(globalStats.current.avgPrice)
   }
 
   function refreshOverrides() {
@@ -594,12 +638,17 @@ export default function ProductsTab() {
       </div>
 
       <div className="p-5">
-        {/* Summary cards */}
+        {/* Summary cards — rows load independently; stats shimmer separately */}
         <div className="flex gap-3 mb-5">
-          <SummaryCard label="Total products" value={totalCount.toLocaleString()} />
-          <SummaryCard label="In stock"        value={inStockCount.toLocaleString()} />
-          <SummaryCard label="Out of stock"    value={outStockCount.toLocaleString()} />
-          <SummaryCard label="Avg. price"      value={`$${avgPrice}`} />
+          <SummaryCard label="Total products"   value={totalCount.toLocaleString()}   loading={statsLoading} />
+          <SummaryCard label="In stock"          value={inStockCount.toLocaleString()}  loading={statsLoading} />
+          <SummaryCard label="Out of stock"      value={outStockCount.toLocaleString()} loading={statsLoading} />
+          <SummaryCard label="Avg. price"        value={`$${avgPrice}`}                 loading={statsLoading} />
+          <SummaryCard
+            label={hasFilters ? 'Matching items' : 'Total items (incl. variants)'}
+            value={totalItems.toLocaleString()}
+            loading={statsLoading}
+          />
         </div>
 
         {/* Table view */}
@@ -645,10 +694,10 @@ export default function ProductsTab() {
                   : products.length === 0
                   ? <tr><td colSpan={8} className="px-4 py-16 text-center text-gray-300">No products found.</td></tr>
                   : products.map(p => {
-                      const imgs        = parseImages(p.images)
-                      const supplier    = suppliers[p.supplier_id]
-                      const isVariant   = p.product_type === 'variation_parent'
-                      const expanded    = expandedRows.has(p.product_id)
+                      const imgs         = parseImages(p.images)
+                      const supplier     = suppliers[p.supplier_id]
+                      const isVariant    = p.product_type === 'variation_parent'
+                      const expanded     = expandedRows.has(p.product_id)
                       const isOverridden = overrideSkus.has(p.sku)
                       return (
                         <>
@@ -658,7 +707,7 @@ export default function ProductsTab() {
                               ${freshnessRowClass(p.updated_at) || 'hover:bg-gray-50/80'}`}>
                             <td className="px-3 py-2.5">
                               {imgs[0]
-                                ? <img src={imgs[0]} alt="" className="w-9 h-9 rounded-lg object-cover bg-gray-100" />
+                                ? <img src={imgs[0]} alt="" className="w-9 h-9 rounded-lg object-cover bg-gray-100" loading="lazy" />
                                 : <div className="w-9 h-9 rounded-lg bg-gray-100" />}
                             </td>
                             <td className="px-4 py-2.5">
@@ -722,9 +771,9 @@ export default function ProductsTab() {
                   </div>
                 ))
               : products.map(p => {
-                  const imgs        = parseImages(p.images)
-                  const supplier    = suppliers[p.supplier_id]
-                  const isVariant   = p.product_type === 'variation_parent'
+                  const imgs         = parseImages(p.images)
+                  const supplier     = suppliers[p.supplier_id]
+                  const isVariant    = p.product_type === 'variation_parent'
                   const isOverridden = overrideSkus.has(p.sku)
                   return (
                     <div key={p.product_id}
@@ -732,7 +781,7 @@ export default function ProductsTab() {
                       className="border border-gray-100 rounded-xl overflow-hidden bg-white hover:shadow-md transition-shadow cursor-pointer">
                       <div className="relative">
                         {imgs[0]
-                          ? <img src={imgs[0]} alt={p.title} className="w-full h-40 object-cover bg-gray-50" />
+                          ? <img src={imgs[0]} alt={p.title} className="w-full h-40 object-cover bg-gray-50" loading="lazy" />
                           : <div className="w-full h-40 bg-gray-50 flex items-center justify-center text-gray-200 text-xs">No image</div>}
                         {isVariant && (
                           <span className="absolute top-2 left-2 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-600/90 text-white">
@@ -779,10 +828,10 @@ export default function ProductsTab() {
               </button>
               {Array.from({ length: Math.min(5, pageCount) }, (_, i) => {
                 let pg
-                if (pageCount <= 5)       pg = i
-                else if (page < 3)        pg = i
+                if (pageCount <= 5)            pg = i
+                else if (page < 3)             pg = i
                 else if (page > pageCount - 4) pg = pageCount - 5 + i
-                else                      pg = page - 2 + i
+                else                           pg = page - 2 + i
                 return (
                   <button key={pg} onClick={() => setPage(pg)}
                     className={`w-8 h-7 text-xs rounded-lg border transition-colors ${page === pg ? 'bg-red-600 text-white border-red-600 font-medium' : 'border-gray-200 text-gray-400 hover:bg-gray-50'}`}>

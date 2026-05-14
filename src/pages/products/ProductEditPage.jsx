@@ -164,7 +164,8 @@ function Textarea({ value, onChange, placeholder, rows = 4 }) {
 }
 
 // ─── Image Manager ─────────────────────────────────────────────────────────────
-function ImageManager({ images, onChange, onDelete }) {
+// No immediate DB persist — all changes flow through handleSave only.
+function ImageManager({ images, onChange }) {
   const [newUrl, setNewUrl]           = useState('')
   const [active, setActive]           = useState(0)
   const [deleteIndex, setDeleteIndex] = useState(null)
@@ -184,7 +185,6 @@ function ImageManager({ images, onChange, onDelete }) {
     onChange(next)
     setActive(Math.min(active, next.length - 1))
     setDeleteIndex(null)
-    onDelete?.(next)
   }
 
   function moveUp(i) {
@@ -201,7 +201,7 @@ function ImageManager({ images, onChange, onDelete }) {
         open={deleteIndex !== null}
         icon={<Trash2 size={22} />}
         title="Remove this image?"
-        message="This image will be removed from the product. You can add it back by pasting its URL."
+        message="This image will be removed from the product. Click Save Changes to persist."
         confirmLabel="Yes, remove"
         confirmClass="bg-red-600 hover:bg-red-700"
         cancelLabel="Cancel"
@@ -329,21 +329,22 @@ function VariantRow({ variant, onChange, onDelete }) {
 //  ov  (overrideFields) → saved to `product_overrides` table only
 //      title, description, images
 //
-// This is the ONLY way to guarantee that title/description/images never
-// accidentally touch the products table, and vice-versa.
+// KEY FIX: images are loaded as:
+//   hasOv → parseImages(ovRow.images)   ← use override value as-is, even if empty []
+//   !hasOv → parseImages(p.images)      ← no override, use scraped row
+//
+// This means a saved empty [] is respected and never falls back to p.images.
+// On save, images is always stored as ov.images ?? [] — never null —
+// so null in product_overrides.images is unambiguous "no override row" signal.
 // ──────────────────────────────────────────────────────────────────────────────
 export default function ProductEditPage({ productId, suppliers, categories, onBack, onSaved }) {
   // ── Separate state for each table ──
-  const [pf, setPf]   = useState(null)   // products table fields
-  const [ov, setOv]   = useState(null)   // product_overrides fields
+  const [pf, setPf] = useState(null)   // products table fields
+  const [ov, setOv] = useState(null)   // product_overrides fields
 
   // Snapshots for dirty detection
   const [pfSnap, setPfSnap] = useState(null)
   const [ovSnap, setOvSnap] = useState(null)
-
-  // Keep a ref to ov so persistImagesOverride never reads stale closure state
-  const ovRef = useRef(null)
-  useEffect(() => { ovRef.current = ov }, [ov])
 
   const pfRef = useRef(null)
   useEffect(() => { pfRef.current = pf }, [pf])
@@ -391,24 +392,27 @@ export default function ProductEditPage({ productId, suppliers, categories, onBa
 
         // ── products table fields only ──
         const pfData = {
-          product_id:   p.product_id,
-          sku:          p.sku,
-          price:        p.price,
-          stock:        p.stock,
-          category:     p.category,
-          brand:        p.brand,
-          product_url:  p.product_url,
-          product_type: p.product_type,
-          supplier_id:  p.supplier_id,
-          created_at:   p.created_at,
-          updated_at:   p.updated_at,
+          product_id:        p.product_id,
+          sku:               p.sku,
+          price:             p.price,
+          stock:             p.stock,
+          category:          p.category,
+          brand:             p.brand,
+          short_description: p.short_description,
+          product_url:       p.product_url,
+          product_type:      p.product_type,
+          supplier_id:       p.supplier_id,
+          created_at:        p.created_at,
+          updated_at:        p.updated_at,
         }
 
-        // ── override fields: use override if exists, else fall back to products row ──
+        // ── FIX: if override exists, use its images value as-is (even if []).
+        // Never fall back to p.images when hasOv is true — that would resurrect
+        // deliberately deleted images on every reload.
         const ovData = {
           title:       hasOv ? (ovRow.title       ?? p.title)       : p.title,
           description: hasOv ? (ovRow.description ?? p.description) : p.description,
-          images:      parseImages(hasOv ? (ovRow.images ?? p.images) : p.images),
+          images:      hasOv ? parseImages(ovRow.images) : parseImages(p.images),
         }
 
         setPf(pfData)
@@ -446,28 +450,6 @@ export default function ProductEditPage({ productId, suppliers, categories, onBa
     else onBack()
   }
 
-  // ── Immediately persist image deletion to product_overrides ──
-  // Uses refs so it always reads the latest ov/pf values, never stale closures.
-  async function persistImagesOverride(nextImages) {
-    const currentPf = pfRef.current
-    const currentOv = ovRef.current
-    if (!currentPf?.sku) return
-    try {
-      await supabase.from('product_overrides').upsert({
-        sku:         currentPf.sku,
-        title:       currentOv.title       || null,
-        description: currentOv.description || null,
-        images:      nextImages.length ? nextImages : null,
-        updated_at:  new Date().toISOString(),
-      }, { onConflict: 'sku' })
-      setHasOverride(true)
-      setOvSnap(prev => ({ ...prev, images: nextImages }))
-      onSaved?.()
-    } catch (e) {
-      console.error('Failed to persist image override:', e)
-    }
-  }
-
   // ── Remove override: delete row, restore raw products data ──
   async function doRemoveOverride() {
     setShowRemoveOverride(false)
@@ -478,12 +460,8 @@ export default function ProductEditPage({ productId, suppliers, categories, onBa
     if (err) { setError(err.message); return }
 
     // Restore from the original scraped product cached at load time.
-    // We deliberately do NOT re-fetch here — the products table images
-    // column is never written by this app, so the ref is always the
-    // ground truth. This also avoids any async race with onSaved().
     const p = originalProductRef.current
     if (p) {
-      // Safe parse — Supabase may return jsonb as a parsed array or a string
       const rawImages =
         Array.isArray(p.images)
           ? p.images
@@ -510,7 +488,9 @@ export default function ProductEditPage({ productId, suppliers, categories, onBa
   // ── Save ──
   // pf fields → products table ONLY
   // ov fields → product_overrides table ONLY
-  // Never cross the streams.
+  // images is stored as ov.images ?? [] — NEVER null —
+  // so that an empty array is unambiguously "images deleted intentionally"
+  // and is not confused with "no override row" on next load.
   async function handleSave() {
     setSaving(true)
     setError(null)
@@ -519,27 +499,30 @@ export default function ProductEditPage({ productId, suppliers, categories, onBa
       const { error: prodErr } = await supabase
         .from('products')
         .update({
-          price:        parseFloat(pf.price) || 0,
-          stock:        parseInt(pf.stock)   || 0,
-          category:     pf.category,
-          brand:        pf.brand,
-          sku:          pf.sku,
-          product_url:  pf.product_url,
-          product_type: pf.product_type,
-          supplier_id:  pf.supplier_id,
-          updated_at:   new Date().toISOString(),
+          price:             parseFloat(pf.price) || 0,
+          stock:             parseInt(pf.stock)   || 0,
+          category:          pf.category,
+          brand:             pf.brand,
+          short_description: pf.short_description,
+          sku:               pf.sku,
+          product_url:       pf.product_url,
+          product_type:      pf.product_type,
+          supplier_id:       pf.supplier_id,
+          updated_at:        new Date().toISOString(),
         })
         .eq('product_id', productId)
       if (prodErr) throw prodErr
 
-      // 2. Save display content to product_overrides ONLY — never to products
+      // 2. Save display content to product_overrides ONLY — never to products.
+      //    Store images as [] when empty so null in this column always means
+      //    "no override row fetched", never "images were cleared".
       const { error: ovErr } = await supabase
         .from('product_overrides')
         .upsert({
           sku:         pf.sku,
           title:       ov.title       || null,
           description: ov.description || null,
-          images:      ov.images?.length ? ov.images : null,
+          images:      ov.images ?? [],
           updated_at:  new Date().toISOString(),
         }, { onConflict: 'sku' })
       if (ovErr) throw ovErr
@@ -709,7 +692,6 @@ export default function ProductEditPage({ productId, suppliers, categories, onBa
               <ImageManager
                 images={ov.images}
                 onChange={v => setOvField('images', v)}
-                onDelete={nextImages => persistImagesOverride(nextImages)}
               />
             </Section>
 
