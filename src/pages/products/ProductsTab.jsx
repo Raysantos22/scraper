@@ -1,12 +1,25 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { supabase } from '../../lib/supabase'
 import {
   LayoutGrid, Table2, Search, Plus, ChevronLeft, ChevronRight,
-  ChevronDown, ChevronUp, Download, Layers
+  ChevronDown, ChevronUp, Download, Layers, Upload, Loader2, X
 } from 'lucide-react'
 import ProductEditPage, { parseImages, StockBadge } from './ProductEditPage'
+import { CsvOverrideUploadModal, ImportProgressToast, runBatches } from './CsvOverrideUploadModal'
 
 const PAGE_SIZE = 50
+
+// ─── Abort-safe fetch wrapper ─────────────────────────────────────────────────
+// Returns { data, count, error } and accepts a signal for cancellation
+async function safeFetch(queryFn, signal) {
+  try {
+    const result = await queryFn()
+    if (signal?.aborted) return { data: null, count: null, error: new Error('aborted') }
+    return result
+  } catch (e) {
+    return { data: null, count: null, error: e }
+  }
+}
 
 // ─── CSV Export ───────────────────────────────────────────────────────────────
 async function exportProductsCsv(supabase, {
@@ -33,7 +46,6 @@ async function exportProductsCsv(supabase, {
     from += BATCH
   }
   if (!allRows.length) return
-
   const headers = Object.keys(allRows[0])
   const esc = v => {
     if (Array.isArray(v)) v = v.join(' | ')
@@ -74,8 +86,8 @@ function SummaryCard({ label, value, loading }) {
   )
 }
 
-// ─── Filter Dropdowns ─────────────────────────────────────────────────────────
-function FilterDropdown({ label, options, value, onChange }) {
+// ─── Generic dropdown (memoized) ──────────────────────────────────────────────
+const FilterDropdown = React.memo(function FilterDropdown({ label, options, value, onChange }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
   useEffect(() => {
@@ -111,7 +123,7 @@ function FilterDropdown({ label, options, value, onChange }) {
       )}
     </div>
   )
-}
+})
 
 const MIN_QTY_PRESETS = [
   { label: 'All quantities', value: '' },
@@ -123,7 +135,7 @@ const MIN_QTY_PRESETS = [
   { label: '≥ 100 in stock', value: '100' },
 ]
 
-function MinQtyDropdown({ value, onChange }) {
+const MinQtyDropdown = React.memo(function MinQtyDropdown({ value, onChange }) {
   const [open, setOpen]     = useState(false)
   const [custom, setCustom] = useState('')
   const ref                 = useRef(null)
@@ -179,7 +191,7 @@ function MinQtyDropdown({ value, onChange }) {
       )}
     </div>
   )
-}
+})
 
 const PRICE_PRESETS = {
   min: [
@@ -202,7 +214,7 @@ const PRICE_PRESETS = {
   ],
 }
 
-function PriceDropdown({ mode, value, onChange }) {
+const PriceDropdown = React.memo(function PriceDropdown({ mode, value, onChange }) {
   const [open, setOpen]     = useState(false)
   const [custom, setCustom] = useState('')
   const ref                 = useRef(null)
@@ -262,14 +274,16 @@ function PriceDropdown({ mode, value, onChange }) {
       )}
     </div>
   )
-}
+})
 
-// ─── Inline variant rows ──────────────────────────────────────────────────────
-function VariantRows({ productId, onSelect }) {
+// ─── Inline variant rows (memoized) ──────────────────────────────────────────
+const VariantRows = React.memo(function VariantRows({ productId, onSelect }) {
   const [variants, setVariants] = useState(null)
   useEffect(() => {
+    let cancelled = false
     supabase.from('variants').select('*').eq('product_id', productId)
-      .then(({ data }) => setVariants(data || []))
+      .then(({ data }) => { if (!cancelled) setVariants(data || []) })
+    return () => { cancelled = true }
   }, [productId])
 
   if (variants === null) {
@@ -309,14 +323,13 @@ function VariantRows({ productId, onSelect }) {
       </tr>
     )
   })
-}
+})
 
 // ─── Freshness helpers ────────────────────────────────────────────────────────
 function daysSince(dateStr) {
   if (!dateStr) return null
   return Math.floor((Date.now() - new Date(dateStr).getTime()) / 864e5)
 }
-
 function freshnessRowClass(updatedAt) {
   const days = daysSince(updatedAt)
   if (days === null || days === 0) return ''
@@ -325,16 +338,64 @@ function freshnessRowClass(updatedAt) {
 }
 
 // ─── Module-level stats cache ─────────────────────────────────────────────────
-// Lives outside the component so it persists across re-mounts within the same
-// browser session (e.g. switching tabs and back). Reset on full page reload.
 const STATS_CACHE = {
-  ready:      false,
-  total:      0,
-  inStock:    0,
-  outStock:   0,
-  avgPrice:   '0.00',
-  totalItems: 0,   // products + variants
+  ready: false, total: 0, inStock: 0, outStock: 0, avgPrice: '0.00', totalItems: 0,
 }
+
+// ─── Product row (memoized to avoid full list re-render on expand toggle) ────
+const ProductRow = React.memo(function ProductRow({
+  p, supplier, isOverridden, expanded, onEdit, onToggleExpand
+}) {
+  const imgs      = parseImages(p.images)
+  const isVariant = p.product_type === 'variation_parent'
+  return (
+    <React.Fragment>
+      <tr
+        onClick={() => onEdit(p.product_id)}
+        className={`border-b border-gray-50 transition-colors cursor-pointer last:border-none group
+          ${freshnessRowClass(p.updated_at) || 'hover:bg-gray-50/80'}`}>
+        <td className="px-3 py-2.5">
+          {imgs[0]
+            ? <img src={imgs[0]} alt="" className="w-9 h-9 rounded-lg object-cover bg-gray-100" loading="lazy" />
+            : <div className="w-9 h-9 rounded-lg bg-gray-100" />}
+        </td>
+        <td className="px-4 py-2.5">
+          <div className="flex items-start gap-2">
+            {isVariant && (
+              <button onClick={e => onToggleExpand(e, p.product_id)}
+                className={`mt-0.5 shrink-0 w-5 h-5 rounded flex items-center justify-center transition-colors ${expanded ? 'bg-purple-100 text-purple-600' : 'bg-gray-100 text-gray-400 group-hover:bg-gray-200'}`}
+                title={expanded ? 'Collapse' : 'Expand variants'}>
+                {expanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
+              </button>
+            )}
+            <div className="min-w-0">
+              <p className="font-medium text-gray-900 truncate leading-snug">{p.title}</p>
+              <p className="text-gray-400 mt-0.5 truncate">{p.brand}</p>
+            </div>
+          </div>
+        </td>
+        <td className="px-4 py-2.5 font-mono text-gray-400 truncate">{p.sku}</td>
+        <td className="px-4 py-2.5">
+          {p.category
+            ? <span className="px-2 py-0.5 rounded-full text-blue-700 bg-blue-50 border border-blue-100 block truncate w-fit max-w-full">{p.category}</span>
+            : <span className="text-gray-200">—</span>}
+        </td>
+        <td className="px-4 py-2.5 font-semibold text-gray-900">${parseFloat(p.price || 0).toFixed(2)}</td>
+        <td className="px-4 py-2.5 text-gray-600">{p.stock}</td>
+        <td className="px-4 py-2.5 text-gray-400 truncate">{supplier?.supplier_name || '—'}</td>
+        <td className="px-4 py-2.5">
+          <div className="flex flex-col gap-1">
+            <StockBadge stock={p.stock} />
+            {isOverridden && <OverrideBadge />}
+          </div>
+        </td>
+      </tr>
+      {isVariant && expanded && (
+        <VariantRows productId={p.product_id} onSelect={() => onEdit(p.product_id)} />
+      )}
+    </React.Fragment>
+  )
+})
 
 // ─── Main Tab ─────────────────────────────────────────────────────────────────
 export default function ProductsTab() {
@@ -342,29 +403,28 @@ export default function ProductsTab() {
   const [products, setProducts]               = useState([])
   const [suppliers, setSuppliers]             = useState({})
   const [loading, setLoading]                 = useState(true)
-
-  // If cache already warm, skip the loading shimmer for stats immediately
+  const [searchLoading, setSearchLoading]     = useState(false)
   const [statsLoading, setStatsLoading]       = useState(!STATS_CACHE.ready)
-
   const [view, setView]                       = useState('table')
   const [exporting, setExporting]             = useState(false)
   const [expandedRows, setExpandedRows]       = useState(new Set())
   const [filterFreshness, setFilterFreshness] = useState('')
-
-  // Seed from cache so first paint shows real numbers (if already loaded)
+  const [showCsvUpload, setShowCsvUpload]     = useState(false)
+  const [importProgress, setImportProgress]   = useState(null)
   const [totalCount, setTotalCount]           = useState(STATS_CACHE.total)
   const [inStockCount, setInStockCount]       = useState(STATS_CACHE.inStock)
   const [outStockCount, setOutStockCount]     = useState(STATS_CACHE.outStock)
   const [avgPrice, setAvgPrice]               = useState(STATS_CACHE.avgPrice)
   const [totalItems, setTotalItems]           = useState(STATS_CACHE.totalItems)
   const [overrideSkus, setOverrideSkus]       = useState(new Set())
-
   const [page, setPage]                       = useState(0)
   const [filteredCount, setFilteredCount]     = useState(0)
   const pageCount = Math.ceil(filteredCount / PAGE_SIZE)
 
-  const [searchInput, setSearchInput]         = useState('')
-  const [search, setSearch]                   = useState('')
+  // ── Search: two-stage — instant optimistic, then committed ──
+  const [searchInput, setSearchInput]   = useState('')
+  const [search, setSearch]             = useState('')
+
   const [filterCategory, setFilterCategory]   = useState('')
   const [filterStock, setFilterStock]         = useState('')
   const [filterSupplier, setFilterSupplier]   = useState('')
@@ -376,20 +436,12 @@ export default function ProductsTab() {
   const [categories, setCategories]           = useState([])
   const [supplierOptions, setSupplierOptions] = useState([])
 
-  // Sequence counter — discard stale responses if a newer fetch has started
-  const fetchSeq = useRef(0)
+  // ── AbortController refs (cancel stale fetches instantly) ──
+  const pageAbortRef  = useRef(null)
+  const statsAbortRef = useRef(null)
+  const statsKeyRef   = useRef(null)   // last filter key for which stats were loaded
 
-  function toggleExpand(e, productId) {
-    e.stopPropagation()
-    setExpandedRows(prev => {
-      const next = new Set(prev)
-      next.has(productId) ? next.delete(productId) : next.add(productId)
-      return next
-    })
-  }
-
-  // ── Load metadata in parallel with first page fetch ───────────────────────
-  // No longer gates fetchPage. Both fire on mount simultaneously.
+  // ── Load meta once ──
   useEffect(() => {
     async function loadMeta() {
       const [{ data: supps }, { data: cats }, { data: ovRows }] = await Promise.all([
@@ -397,7 +449,6 @@ export default function ProductsTab() {
         supabase.from('products').select('category').not('category', 'is', null),
         supabase.from('product_overrides').select('sku'),
       ])
-
       const suppMap = {}
       supps?.forEach(s => { suppMap[s.supplier_id] = s })
       setSuppliers(suppMap)
@@ -408,13 +459,17 @@ export default function ProductsTab() {
     loadMeta()
   }, [])
 
-  // Debounce search input
+  // ── Debounce search input: 300ms (was 600ms) ──
   useEffect(() => {
-    const t = setTimeout(() => setSearch(searchInput), 400)
+    if (searchInput !== search) setSearchLoading(true)
+    const t = setTimeout(() => {
+      setSearch(searchInput)
+      setSearchLoading(false)
+    }, 300)
     return () => clearTimeout(t)
   }, [searchInput])
 
-  // Reset to page 0 whenever any filter/sort changes
+  // ── Reset page when filters change ──
   useEffect(() => {
     setPage(0)
   }, [search, filterCategory, filterStock, filterSupplier,
@@ -423,50 +478,78 @@ export default function ProductsTab() {
   const hasFilters = !!(filterCategory || filterStock || filterSupplier || search ||
     filterMinQty || filterMinPrice || filterMaxPrice || filterFreshness)
 
-  // Reusable filter builder — appends all active filters to a query
-  const buildFilterQuery = useCallback((q) => {
-    if (search)         q = q.or(`title.ilike.%${search}%,sku.ilike.%${search}%,brand.ilike.%${search}%`)
-    if (filterCategory) q = q.eq('category', filterCategory)
-    if (filterStock === 'in')  q = q.gt('stock', 0)
-    if (filterStock === 'out') q = q.eq('stock', 0)
-    if (filterStock === 'low') q = q.gt('stock', 0).lt('stock', 50)
-    if (filterSupplier) q = q.eq('supplier_id', filterSupplier)
-    if (filterMinQty   !== '') q = q.gte('stock', parseInt(filterMinQty))
-    if (filterMinPrice !== '') q = q.gte('price', parseFloat(filterMinPrice))
-    if (filterMaxPrice !== '') q = q.lte('price', parseFloat(filterMaxPrice))
-    const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString()
-    if (filterFreshness === 'Updated within last 24hrs') q = q.gte('updated_at', daysAgo(1))
-    if (filterFreshness === '1-7 days') q = q.lt('updated_at', daysAgo(1)).gte('updated_at', daysAgo(7))
-    if (filterFreshness === 'Older than 7 days') q = q.lt('updated_at', daysAgo(7))
-    return q
-  }, [search, filterCategory, filterStock, filterSupplier,
-      filterMinQty, filterMinPrice, filterMaxPrice, filterFreshness])
+  const filterKey = useMemo(() =>
+    JSON.stringify({ search, filterCategory, filterStock, filterSupplier,
+      filterMinQty, filterMinPrice, filterMaxPrice, filterFreshness }),
+    [search, filterCategory, filterStock, filterSupplier,
+     filterMinQty, filterMinPrice, filterMaxPrice, filterFreshness]
+  )
 
-  const fetchPage = useCallback(async () => {
-    const seq = ++fetchSeq.current
+  // ── Core query builder ──
+  // Kept as a plain function (not useCallback) — takes a Supabase query and applies filters.
+  // This avoids stale closure issues without adding to dep arrays.
+  function applyFilters(q, opts = {}) {
+    const {
+      s = search, cat = filterCategory, stk = filterStock, sup = filterSupplier,
+      mq = filterMinQty, mnp = filterMinPrice, mxp = filterMaxPrice, fr = filterFreshness,
+    } = opts
+    if (s)   q = q.or(`title.ilike.%${s}%,sku.ilike.%${s}%,brand.ilike.%${s}%`)
+    if (cat) q = q.eq('category', cat)
+    if (stk === 'in')  q = q.gt('stock', 0)
+    if (stk === 'out') q = q.eq('stock', 0)
+    if (stk === 'low') q = q.gt('stock', 0).lt('stock', 50)
+    if (sup) q = q.eq('supplier_id', sup)
+    if (mq  !== '') q = q.gte('stock', parseInt(mq))
+    if (mnp !== '') q = q.gte('price', parseFloat(mnp))
+    if (mxp !== '') q = q.lte('price', parseFloat(mxp))
+    const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString()
+    if (fr === 'Updated within last 24hrs') q = q.gte('updated_at', daysAgo(1))
+    if (fr === '1-7 days') q = q.lt('updated_at', daysAgo(1)).gte('updated_at', daysAgo(7))
+    if (fr === 'Older than 7 days') q = q.lt('updated_at', daysAgo(7))
+    return q
+  }
+
+  // ── Page fetch — aborts previous, only fetches current page ──
+  const fetchPage = useCallback(async (
+    opts = {},   // allow caller to pass snapshot of filter state
+    pg   = page,
+    sb   = sortBy,
+    sd   = sortDir
+  ) => {
+    // Cancel any in-flight page fetch
+    pageAbortRef.current?.abort()
+    const controller = new AbortController()
+    pageAbortRef.current = controller
+
     setLoading(true)
 
-    // ── Phase 1: Fetch visible page rows — no supplier gate, fires immediately
-    const { data, count, error } = await buildFilterQuery(
+    const q = applyFilters(
       supabase.from('products').select(
         'product_id,sku,title,price,stock,category,brand,images,supplier_id,product_type,updated_at',
         { count: 'exact' }
-      )
+      ),
+      opts
     )
-      .order(sortBy, { ascending: sortDir === 'asc' })
-      .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
+      .order(sb, { ascending: sd === 'asc' })
+      .range(pg * PAGE_SIZE, (pg + 1) * PAGE_SIZE - 1)
 
-    if (seq !== fetchSeq.current) return   // stale — discard
+    const { data, count, error } = await q
+    if (controller.signal.aborted) return
 
     if (!error) {
       setProducts(data || [])
       setFilteredCount(count || 0)
     }
-    setLoading(false)  // rows visible NOW; stats may still be loading
+    setLoading(false)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, sortBy, sortDir, filterKey])
 
-    // ── Phase 2: Stats — use module-level cache when no filters active ────────
+  // ── Stats fetch — skipped if filter key unchanged, aborts previous ──
+  const fetchStats = useCallback(async (opts = {}) => {
+    const key = filterKey
+
+    // Return cached baseline stats immediately
     if (!hasFilters && STATS_CACHE.ready) {
-      // Cache is warm — paint instantly, zero extra queries
       setTotalCount(STATS_CACHE.total)
       setInStockCount(STATS_CACHE.inStock)
       setOutStockCount(STATS_CACHE.outStock)
@@ -476,47 +559,47 @@ export default function ProductsTab() {
       return
     }
 
+    if (statsKeyRef.current === key) return   // same filters → skip
+
+    statsAbortRef.current?.abort()
+    const controller = new AbortController()
+    statsAbortRef.current = controller
+    statsKeyRef.current   = key
     setStatsLoading(true)
 
-    const base = hasFilters ? buildFilterQuery : (q => q)
+    const af = q => applyFilters(q, opts)
 
-    // Run all stat queries in parallel
+    // Run 3 counts + 1 price select in parallel (skip variant count under filters)
     const [
       { count: total },
       { count: inStock },
       { count: outStock },
       { data: priceRows },
-      { count: variantCount },
+      variantResult,
     ] = await Promise.all([
-      base(supabase.from('products').select('*', { count: 'exact', head: true })),
-      base(supabase.from('products').select('*', { count: 'exact', head: true })).gt('stock', 0),
-      base(supabase.from('products').select('*', { count: 'exact', head: true })).eq('stock', 0),
-      base(supabase.from('products').select('price')),
-      // Variant count — unfiltered uses full table; filtered uses base product ids
-      // For simplicity use the full variant table count (unfiltered only; else product count)
+      af(supabase.from('products').select('*', { count: 'exact', head: true })),
+      af(supabase.from('products').select('*', { count: 'exact', head: true })).gt('stock', 0),
+      af(supabase.from('products').select('*', { count: 'exact', head: true })).eq('stock', 0),
+      // Only fetch prices for up to 5000 rows to keep it fast; good enough for avg
+      af(supabase.from('products').select('price').limit(5000)),
       hasFilters
         ? Promise.resolve({ count: 0 })
         : supabase.from('variants').select('*', { count: 'exact', head: true }),
     ])
 
-    if (seq !== fetchSeq.current) return   // stale — discard
+    if (controller.signal.aborted) return
 
     const avg = priceRows?.length
       ? (priceRows.reduce((a, b) => a + parseFloat(b.price || 0), 0) / priceRows.length).toFixed(2)
       : '0.00'
 
     const ti = hasFilters
-      ? (total || 0)                          // filtered: just show matching products
-      : (total || 0) + (variantCount || 0)    // global: products + all variants
+      ? (total || 0)
+      : (total || 0) + (variantResult?.count || 0)
 
-    // Write through to module-level cache when no filters
     if (!hasFilters) {
-      STATS_CACHE.ready      = true
-      STATS_CACHE.total      = total      || 0
-      STATS_CACHE.inStock    = inStock    || 0
-      STATS_CACHE.outStock   = outStock   || 0
-      STATS_CACHE.avgPrice   = avg
-      STATS_CACHE.totalItems = ti
+      Object.assign(STATS_CACHE, { ready: true, total: total || 0, inStock: inStock || 0,
+        outStock: outStock || 0, avgPrice: avg, totalItems: ti })
     }
 
     setTotalCount(total      || 0)
@@ -525,10 +608,23 @@ export default function ProductsTab() {
     setAvgPrice(avg)
     setTotalItems(ti)
     setStatsLoading(false)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterKey, hasFilters])
 
-  }, [buildFilterQuery, sortBy, sortDir, page, hasFilters])
-
+  // ── Trigger fetches ──
   useEffect(() => { fetchPage() }, [fetchPage])
+  useEffect(() => { fetchStats() }, [fetchStats])
+
+  // ── Stable callbacks so child rows don't re-render ──
+  const handleEdit = useCallback(id => setEditingId(id), [])
+  const handleToggleExpand = useCallback((e, productId) => {
+    e.stopPropagation()
+    setExpandedRows(prev => {
+      const next = new Set(prev)
+      next.has(productId) ? next.delete(productId) : next.add(productId)
+      return next
+    })
+  }, [])
 
   function toggleSort(col) {
     if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc')
@@ -560,6 +656,21 @@ export default function ProductsTab() {
     })
   }
 
+  async function handleImportStart({ rows, batches }) {
+    setImportProgress({ status: 'running', done: 0, total: rows.length, failed: 0, failedSkus: [] })
+    await runBatches(batches, (batchSize, hadError, _errMsg, skus) => {
+      setImportProgress(p => ({
+        ...p,
+        done:       p.done + batchSize,
+        failed:     p.failed + (hadError ? batchSize : 0),
+        failedSkus: hadError ? [...p.failedSkus, ...skus] : p.failedSkus,
+      }))
+    })
+    setImportProgress(p => ({ ...p, status: 'done' }))
+    fetchPage()
+    refreshOverrides()
+  }
+
   // ── Edit view ──
   if (editingId !== null) {
     return (
@@ -576,15 +687,39 @@ export default function ProductsTab() {
   // ── List view ──
   return (
     <div>
+      <CsvOverrideUploadModal
+        open={showCsvUpload}
+        onClose={() => setShowCsvUpload(false)}
+        onImportStart={handleImportStart}
+      />
+      <ImportProgressToast
+        state={importProgress}
+        onDismiss={() => setImportProgress(null)}
+      />
+
       {/* Toolbar */}
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 gap-3 flex-wrap">
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Search with instant clear button */}
           <div className="relative">
-            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-300" />
-            <input type="text" value={searchInput} onChange={e => setSearchInput(e.target.value)}
+            {searchLoading
+              ? <Loader2 size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 animate-spin" />
+              : <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-300" />
+            }
+            <input
+              type="text"
+              value={searchInput}
+              onChange={e => setSearchInput(e.target.value)}
               placeholder="Search title, SKU, brand..."
-              className="pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-gray-300 placeholder-gray-300 w-52"
+              className="pl-8 pr-7 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-gray-300 placeholder-gray-300 w-52"
             />
+            {searchInput && (
+              <button
+                onClick={() => { setSearchInput(''); setSearch('') }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-300 hover:text-gray-500 transition-colors">
+                <X size={11} />
+              </button>
+            )}
           </div>
           <FilterDropdown label="Category" options={categories} value={filterCategory} onChange={setFilterCategory} />
           <FilterDropdown label="Stock" options={['in', 'out', 'low']} value={filterStock} onChange={setFilterStock} />
@@ -634,11 +769,16 @@ export default function ProductsTab() {
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-40 transition-colors">
             <Download size={13} />{exporting ? 'Exporting…' : hasFilters ? 'Export filtered CSV' : 'Export CSV'}
           </button>
+          <button
+            onClick={() => setShowCsvUpload(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors">
+            <Upload size={13} /> Import Overrides CSV
+          </button>
         </div>
       </div>
 
       <div className="p-5">
-        {/* Summary cards — rows load independently; stats shimmer separately */}
+        {/* Summary cards */}
         <div className="flex gap-3 mb-5">
           <SummaryCard label="Total products"   value={totalCount.toLocaleString()}   loading={statsLoading} />
           <SummaryCard label="In stock"          value={inStockCount.toLocaleString()}  loading={statsLoading} />
@@ -693,64 +833,17 @@ export default function ProductsTab() {
                     ))
                   : products.length === 0
                   ? <tr><td colSpan={8} className="px-4 py-16 text-center text-gray-300">No products found.</td></tr>
-                  : products.map(p => {
-                      const imgs         = parseImages(p.images)
-                      const supplier     = suppliers[p.supplier_id]
-                      const isVariant    = p.product_type === 'variation_parent'
-                      const expanded     = expandedRows.has(p.product_id)
-                      const isOverridden = overrideSkus.has(p.sku)
-                      return (
-                        <>
-                          <tr key={p.product_id}
-                            onClick={() => setEditingId(p.product_id)}
-                            className={`border-b border-gray-50 transition-colors cursor-pointer last:border-none group
-                              ${freshnessRowClass(p.updated_at) || 'hover:bg-gray-50/80'}`}>
-                            <td className="px-3 py-2.5">
-                              {imgs[0]
-                                ? <img src={imgs[0]} alt="" className="w-9 h-9 rounded-lg object-cover bg-gray-100" loading="lazy" />
-                                : <div className="w-9 h-9 rounded-lg bg-gray-100" />}
-                            </td>
-                            <td className="px-4 py-2.5">
-                              <div className="flex items-start gap-2">
-                                {isVariant && (
-                                  <button onClick={e => toggleExpand(e, p.product_id)}
-                                    className={`mt-0.5 shrink-0 w-5 h-5 rounded flex items-center justify-center transition-colors ${expanded ? 'bg-purple-100 text-purple-600' : 'bg-gray-100 text-gray-400 group-hover:bg-gray-200'}`}
-                                    title={expanded ? 'Collapse' : 'Expand variants'}>
-                                    {expanded ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
-                                  </button>
-                                )}
-                                <div className="min-w-0">
-                                  <p className="font-medium text-gray-900 truncate leading-snug">{p.title}</p>
-                                  <p className="text-gray-400 mt-0.5 truncate">{p.brand}</p>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="px-4 py-2.5 font-mono text-gray-400 truncate">{p.sku}</td>
-                            <td className="px-4 py-2.5">
-                              {p.category
-                                ? <span className="px-2 py-0.5 rounded-full text-blue-700 bg-blue-50 border border-blue-100 block truncate w-fit max-w-full">{p.category}</span>
-                                : <span className="text-gray-200">—</span>}
-                            </td>
-                            <td className="px-4 py-2.5 font-semibold text-gray-900">${parseFloat(p.price || 0).toFixed(2)}</td>
-                            <td className="px-4 py-2.5 text-gray-600">{p.stock}</td>
-                            <td className="px-4 py-2.5 text-gray-400 truncate">{supplier?.supplier_name || '—'}</td>
-                            <td className="px-4 py-2.5">
-                              <div className="flex flex-col gap-1">
-                                <StockBadge stock={p.stock} />
-                                {isOverridden && <OverrideBadge />}
-                              </div>
-                            </td>
-                          </tr>
-                          {isVariant && expanded && (
-                            <VariantRows
-                              key={`vr-${p.product_id}`}
-                              productId={p.product_id}
-                              onSelect={() => setEditingId(p.product_id)}
-                            />
-                          )}
-                        </>
-                      )
-                    })
+                  : products.map(p => (
+                      <ProductRow
+                        key={p.product_id}
+                        p={p}
+                        supplier={suppliers[p.supplier_id]}
+                        isOverridden={overrideSkus.has(p.sku)}
+                        expanded={expandedRows.has(p.product_id)}
+                        onEdit={handleEdit}
+                        onToggleExpand={handleToggleExpand}
+                      />
+                    ))
                 }
               </tbody>
             </table>
