@@ -1,11 +1,20 @@
+import { useState } from 'react'
 import { supabase } from '../lib/supabase'
-import { LogOut } from 'lucide-react'
+import { LogOut, Package, ShoppingBag } from 'lucide-react'
 import ProductsTab from './products/ProductsTab'
+import EbayTab from './ebay/EbayTab'
 
 export default function Dashboard({ session }) {
+  const [activeTab, setActiveTab] = useState('products')
+
   async function handleLogout() {
     await supabase.auth.signOut()
   }
+
+  const tabs = [
+    { id: 'products', label: 'Products', icon: Package },
+    { id: 'ebay',     label: 'Stores', icon: ShoppingBag },
+  ]
 
   return (
     <div className="flex h-screen bg-white font-sans text-sm overflow-hidden">
@@ -24,12 +33,20 @@ export default function Dashboard({ session }) {
         {/* Nav */}
         <div className="px-3 mb-1">
           <p className="text-xs text-gray-400 px-2 mb-1 font-medium">Inventory</p>
-          <div className="flex items-center gap-2.5 w-full px-2 py-1.5 rounded-md bg-gray-100 text-gray-900 font-medium text-sm">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
-              <path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/>
-            </svg>
-            Products
-          </div>
+          {tabs.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              onClick={() => setActiveTab(id)}
+              className={`flex items-center gap-2.5 w-full px-2 py-1.5 rounded-md text-sm mb-0.5 transition-colors ${
+                activeTab === id
+                  ? 'bg-gray-100 text-gray-900 font-medium'
+                  : 'text-gray-400 hover:bg-gray-50 hover:text-gray-700'
+              }`}
+            >
+              <Icon size={15} className="flex-shrink-0" />
+              {label}
+            </button>
+          ))}
         </div>
 
         {/* Bottom */}
@@ -52,12 +69,15 @@ export default function Dashboard({ session }) {
 
         {/* Top bar */}
         <header className="border-b border-gray-100 px-6 py-3 flex items-center justify-between">
-          <h1 className="text-base font-semibold text-gray-900">Products</h1>
+          <h1 className="text-base font-semibold text-gray-900">
+            {tabs.find(t => t.id === activeTab)?.label}
+          </h1>
         </header>
 
         {/* Content */}
         <main className="flex-1 overflow-auto">
-          <ProductsTab />
+          {activeTab === 'products' && <ProductsTab />}
+          {activeTab === 'ebay'     && <EbayTab />}
         </main>
       </div>
     </div>

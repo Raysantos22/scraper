@@ -1,5 +1,8 @@
-async function exportProductsCsv(supabase, {
-  supplierId, category, stock, search, minQty, minPrice, maxPrice
+// C:\Users\ADMIN\scraper\src\lib\exportCsv.js
+export async function exportProductsCsv(supabase, {
+  filterSupplier: supplierId, filterCategory: category, filterStock: stock,
+  search, filterMinQty: minQty, filterMinPrice: minPrice, filterMaxPrice: maxPrice,
+  filterOverride,
 } = {}) {
   let allProducts = [], from = 0
   const BATCH = 1000
@@ -7,7 +10,7 @@ async function exportProductsCsv(supabase, {
   // 1. Fetch all matching products (batched)
   while (true) {
     let q = supabase
-      .from('products')
+      .from(filterOverride ? 'products_with_status' : 'products')
       .select('*')
       .range(from, from + BATCH - 1)
 
@@ -20,7 +23,8 @@ async function exportProductsCsv(supabase, {
     if (minQty   != null && minQty   !== '') q = q.gte('stock', parseInt(minQty))
     if (minPrice != null && minPrice !== '') q = q.gte('price', parseFloat(minPrice))
     if (maxPrice != null && maxPrice !== '') q = q.lte('price', parseFloat(maxPrice))
-
+    if (filterOverride === 'Edited')     q = q.eq('is_overridden', true)
+    if (filterOverride === 'Not Edited') q = q.eq('is_overridden', false)  
     q = q.order('created_at', { ascending: false })
 
     const { data, error } = await q
@@ -114,12 +118,14 @@ async function exportProductsCsv(supabase, {
 
   // 7. CSV escape helper
   const esc = v => {
-    if (Array.isArray(v)) v = v.join(' | ')
-    else if (typeof v === 'object' && v !== null) v = JSON.stringify(v)
-    const s = v == null ? '' : String(v)
-    return s.includes(',') || s.includes('"') || s.includes('\n')
-      ? `"${s.replace(/"/g, '""')}"` : s
-  }
+  if (Array.isArray(v)) v = v.join(' | ')
+  else if (typeof v === 'object' && v !== null) v = JSON.stringify(v)
+  let s = v == null ? '' : String(v)
+  // Strip HTML tags for cleaner CSV output
+  s = s.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+  return s.includes(',') || s.includes('"') || s.includes('\n')
+    ? `"${s.replace(/"/g, '""')}"` : s
+}
 
   // 8. Build flattened rows: parent row + child variant rows interleaved
   const rows = []
