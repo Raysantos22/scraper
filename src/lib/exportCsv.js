@@ -1,98 +1,73 @@
-// C:\Users\ADMIN\scraper\src\lib\exportCsv.js
-export async function exportProductsCsv(supabase, {
+// src/lib/exportCsv.js
+import { api } from './api'
+
+export async function exportProductsCsv({
   filterSupplier: supplierId, filterCategory: category, filterStock: stock,
   search, filterMinQty: minQty, filterMinPrice: minPrice, filterMaxPrice: maxPrice,
   filterOverride,
 } = {}) {
-  let allProducts = [], from = 0
-  const BATCH = 1000
+  let allProducts = [], page = 0
+  const LIMIT = 1000
 
-  // 1. Fetch all matching products (batched)
+  // 1. Fetch all matching products (paginated)
   while (true) {
-    let q = supabase
-      .from(filterOverride ? 'products_with_status' : 'products')
-      .select('*')
-      .range(from, from + BATCH - 1)
+    const params = new URLSearchParams({
+      page, limit: LIMIT,
+      sort: 'created_at', dir: 'desc',
+      ...(filterOverride  ? { override: 'true' }          : {}),
+      ...(search          ? { search }                    : {}),
+      ...(category        ? { category }                  : {}),
+      ...(stock           ? { stock }                     : {}),
+      ...(supplierId      ? { supplier_id: supplierId }   : {}),
+      ...(minQty   != null && minQty   !== '' ? { minQty }   : {}),
+      ...(minPrice != null && minPrice !== '' ? { minPrice } : {}),
+      ...(maxPrice != null && maxPrice !== '' ? { maxPrice } : {}),
+    })
 
-    if (supplierId) q = q.eq('supplier_id', supplierId)
-    if (category)   q = q.eq('category', category)
-    if (stock === 'in')  q = q.gt('stock', 0)
-    if (stock === 'out') q = q.eq('stock', 0)
-    if (stock === 'low') q = q.gt('stock', 0).lt('stock', 50)
-    if (search) q = q.or(`title.ilike.%${search}%,sku.ilike.%${search}%,brand.ilike.%${search}%`)
-    if (minQty   != null && minQty   !== '') q = q.gte('stock', parseInt(minQty))
-    if (minPrice != null && minPrice !== '') q = q.gte('price', parseFloat(minPrice))
-    if (maxPrice != null && maxPrice !== '') q = q.lte('price', parseFloat(maxPrice))
-    if (filterOverride === 'Edited')     q = q.eq('is_overridden', true)
-    if (filterOverride === 'Not Edited') q = q.eq('is_overridden', false)  
-    q = q.order('created_at', { ascending: false })
-
-    const { data, error } = await q
-    if (error || !data?.length) break
-    allProducts = [...allProducts, ...data]
-    if (data.length < BATCH) break
-    from += BATCH
+    const res = await api.get(`/api/products?${params}`)
+    if (!res?.data?.length) break
+    allProducts = [...allProducts, ...res.data]
+    if (allProducts.length >= res.count) break
+    page++
   }
 
   if (!allProducts.length) return
 
-  // 2. Fetch all product_overrides in one shot and key by SKU.
-  //    These override title, description, and images — same as the edit page.
+  // 2. Fetch all override SKUs
   const allSkus = allProducts.map(p => p.sku)
   let overridesBySku = {}
-  {
-    let oFrom = 0
-    while (true) {
-      const { data: ovData, error: ovErr } = await supabase
-        .from('product_overrides')
-        .select('sku, title, description, images')
-        .in('sku', allSkus)
-        .range(oFrom, oFrom + BATCH - 1)
+  // Fetch overrides one by one for matching SKUs (batched via separate endpoint if needed)
+  // For export we use override-skus list we already have, and fetch individually only if needed
+  // Simple approach: fetch all overrides via product-overrides endpoint per SKU
+  await Promise.all(
+    allSkus.map(async sku => {
+      try {
+        const ov = await api.get(`/api/product-overrides/${encodeURIComponent(sku)}`)
+        if (ov) overridesBySku[sku] = ov
+      } catch {}
+    })
+  )
 
-      if (ovErr || !ovData?.length) break
-      ovData.forEach(ov => { overridesBySku[ov.sku] = ov })
-      if (ovData.length < BATCH) break
-      oFrom += BATCH
-    }
-  }
-
-  // 3. Fetch all variants for variation_parent products (batched)
-  const parentIds = allProducts
-    .filter(p => p.product_type === 'variation_parent')
-    .map(p => p.product_id)
-
+  // 3. Fetch variants for variation_parent products
+  const parentIds = allProducts.filter(p => p.product_type === 'variation_parent').map(p => p.product_id)
   let variantsByParent = {}
-  if (parentIds.length) {
-    let vFrom = 0
-    while (true) {
-      const { data: vData, error: vErr } = await supabase
-        .from('variants')
-        .select('*')
-        .in('product_id', parentIds)
-        .range(vFrom, vFrom + BATCH - 1)
+  await Promise.all(
+    parentIds.map(async id => {
+      try {
+        const vs = await api.get(`/api/variants?product_id=${id}`)
+        if (vs?.length) variantsByParent[id] = vs
+      } catch {}
+    })
+  )
 
-      if (vErr || !vData?.length) break
-      vData.forEach(v => {
-        if (!variantsByParent[v.product_id]) variantsByParent[v.product_id] = []
-        variantsByParent[v.product_id].push(v)
-      })
-      if (vData.length < BATCH) break
-      vFrom += BATCH
-    }
-  }
-
-  // 4. Helper: safely parse images from either a jsonb array or a JSON string
+  // 4. Helper: safely parse images
   const safeParseImages = raw => {
     if (Array.isArray(raw)) return raw
-    if (typeof raw === 'string') {
-      try { return JSON.parse(raw) } catch { return [] }
-    }
+    if (typeof raw === 'string') { try { return JSON.parse(raw) } catch { return [] } }
     return []
   }
 
-  // 5. Merge overrides into each product — exactly the same logic as ProductEditPage:
-  //    if an override row exists, prefer its title/description/images;
-  //    otherwise fall back to the products table values.
+  // 5. Merge overrides
   const mergedProducts = allProducts.map(p => {
     const ov = overridesBySku[p.sku]
     if (!ov) return p
@@ -108,44 +83,37 @@ export async function exportProductsCsv(supabase, {
   const productHeaders = Object.keys(allProducts[0])
   const variantOnlyFields = [
     'variant_id', 'variant_sku', 'variant_name',
-    'option1_name', 'option1_value',
-    'option2_name', 'option2_value',
+    'option1_name', 'option1_value', 'option2_name', 'option2_value',
     'option3_name', 'option3_value',
   ]
   const extraHeaders = variantOnlyFields.filter(f => !productHeaders.includes(f))
-  // Add has_override so it's visible in the export
   const allHeaders = [...productHeaders, ...extraHeaders, 'has_override', 'row_type', 'parent_product_id']
 
   // 7. CSV escape helper
   const esc = v => {
-  if (Array.isArray(v)) v = v.join(' | ')
-  else if (typeof v === 'object' && v !== null) v = JSON.stringify(v)
-  let s = v == null ? '' : String(v)
-  // Strip HTML tags for cleaner CSV output
-  s = s.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
-  return s.includes(',') || s.includes('"') || s.includes('\n')
-    ? `"${s.replace(/"/g, '""')}"` : s
-}
+    if (Array.isArray(v)) v = v.join(' | ')
+    else if (typeof v === 'object' && v !== null) v = JSON.stringify(v)
+    let s = v == null ? '' : String(v)
+    s = s.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
+    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
+  }
 
-  // 8. Build flattened rows: parent row + child variant rows interleaved
+  // 8. Build rows
   const rows = []
-
   for (const product of mergedProducts) {
     const isParent    = product.product_type === 'variation_parent'
     const hasOverride = !!overridesBySku[product.sku]
 
-    // Parent / standalone row — uses merged (override-aware) values
     const parentRow = allHeaders.map(h => {
       if (h === 'row_type')          return esc(isParent ? 'variation_parent' : 'standalone')
       if (h === 'parent_product_id') return ''
       if (h === 'has_override')      return esc(hasOverride ? 'yes' : 'no')
       if (h === 'images')            return esc(safeParseImages(product.images))
-      if (extraHeaders.includes(h))  return '' // variant-only cols blank for parent row
+      if (extraHeaders.includes(h))  return ''
       return esc(product[h])
     })
     rows.push(parentRow)
 
-    // Child variant rows — inherit parent's merged title/description/images as fallback
     if (isParent && variantsByParent[product.product_id]) {
       for (const v of variantsByParent[product.product_id]) {
         const childRow = allHeaders.map(h => {
@@ -157,12 +125,8 @@ export async function exportProductsCsv(supabase, {
           if (h === 'title')             return esc(v.variant_name)
           if (h === 'price')             return esc(v.price)
           if (h === 'stock')             return esc(v.stock)
-          if (h === 'images') {
-            const vImgs = safeParseImages(v.images)
-            // If variant has no own images, inherit the merged parent images
-            return esc(vImgs.length ? vImgs : safeParseImages(product.images))
-          }
-          if (h === 'description')       return esc(product.description) // from merged product
+          if (h === 'images')            return esc(safeParseImages(v.images).length ? safeParseImages(v.images) : safeParseImages(product.images))
+          if (h === 'description')       return esc(product.description)
           if (h === 'created_at')        return esc(v.created_at)
           if (h === 'updated_at')        return esc(v.updated_at)
           if (h === 'metadata')          return esc(v.metadata)
@@ -175,7 +139,6 @@ export async function exportProductsCsv(supabase, {
           if (h === 'option2_value')     return esc(v.option2_value)
           if (h === 'option3_name')      return esc(v.option3_name)
           if (h === 'option3_value')     return esc(v.option3_value)
-          // Inherit parent merged values for category, brand, supplier, etc.
           return esc(product[h] ?? '')
         })
         rows.push(childRow)
@@ -183,12 +146,12 @@ export async function exportProductsCsv(supabase, {
     }
   }
 
-  // 9. Build and trigger download
-  const csv = [allHeaders.join(','), ...rows.map(r => r.join(','))].join('\n')
+  // 9. Download
+  const csv  = [allHeaders.join(','), ...rows.map(r => r.join(','))].join('\n')
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
   const url  = URL.createObjectURL(blob)
   const a    = document.createElement('a')
-  a.href     = url
+  a.href = url
   a.download = `products_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.csv`
   document.body.appendChild(a); a.click()
   document.body.removeChild(a); URL.revokeObjectURL(url)

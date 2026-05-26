@@ -1,6 +1,6 @@
 // EbayTab.jsx — src/pages/ebay/EbayTab.jsx
 import React, { useState, useEffect, useMemo } from 'react'
-import { api } from '../../lib/api'
+import { supabase } from '../../lib/supabase'
 import {
   RadialBarChart, RadialBar, PolarGrid, PolarRadiusAxis, Label,
   PieChart, Pie,
@@ -45,9 +45,10 @@ const EXAMPLE_SUPPLIER_DATA = [
   { key: 'mecca_items',      supplier: 'Mecca',      items: 180, fill: '#5c0202' },
   { key: 'sephora_items',    supplier: 'Sephora',    items: 145, fill: '#c8f71e' },
   { key: 'house_items',      supplier: 'House',      items: 95,  fill: '#221ef7' },
-  { key: 'vb_items',         supplier: "Vic's Bsmt", items: 80,  fill: '#1ed7f7' },
+  { key: 'vb_items',         supplier: "Vic's Bsmt", items: 80,  fill: '#1ed7f7)' },
   { key: 'amazon_items',     supplier: 'Amazon',     items: 70,  fill: '#FF9900' },
   { key: 'other_items',      supplier: 'Other',      items: 60,  fill: '#09c713' },
+
 ]
 
 function chunkArray(arr, size) {
@@ -284,44 +285,69 @@ function StoreCard({ store, onSelect }) {
 // ─── Search + Filter bar ──────────────────────────────────────────────────────
 function StoreFilterBar({ search, onSearch, supplierFilter, onSupplierFilter, stockFilter, onStockFilter, resultCount, totalCount }) {
   const hasFilters = search || supplierFilter || stockFilter
+
   return (
     <div className="flex flex-wrap items-center gap-3">
+      {/* Search input */}
       <div className="relative flex-1 min-w-[200px] max-w-xs">
         <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
         <input
-          type="text" value={search} onChange={e => onSearch(e.target.value)}
+          type="text"
+          value={search}
+          onChange={e => onSearch(e.target.value)}
           placeholder="Search stores…"
           className="w-full pl-8 pr-8 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent placeholder:text-muted-foreground/60 transition-all"
         />
         {search && (
-          <button onClick={() => onSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors">
+          <button
+            onClick={() => onSearch('')}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+          >
             <X size={12} />
           </button>
         )}
       </div>
+
+      {/* Supplier filter */}
       <div className="relative">
         <SlidersHorizontal size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-        <select value={supplierFilter} onChange={e => onSupplierFilter(e.target.value)}
-          className="pl-8 pr-7 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground transition-all">
+        <select
+          value={supplierFilter}
+          onChange={e => onSupplierFilter(e.target.value)}
+          className="pl-8 pr-7 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground transition-all"
+        >
           <option value="">All Suppliers</option>
-          {SUPPLIERS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+          {SUPPLIERS.map(s => (
+            <option key={s.key} value={s.key}>{s.label}</option>
+          ))}
         </select>
       </div>
-      <select value={stockFilter} onChange={e => onStockFilter(e.target.value)}
-        className="px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground transition-all">
+
+      {/* Stock filter */}
+      <select
+        value={stockFilter}
+        onChange={e => onStockFilter(e.target.value)}
+        className="px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground transition-all"
+      >
         <option value="">All Stock</option>
         <option value="in">Has Active Listings</option>
         <option value="out">Has Out-of-Stock</option>
       </select>
+
+      {/* Clear + result count */}
       <div className="flex items-center gap-2 ml-auto">
         {hasFilters && (
-          <button onClick={() => { onSearch(''); onSupplierFilter(''); onStockFilter('') }}
-            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors">
+          <button
+            onClick={() => { onSearch(''); onSupplierFilter(''); onStockFilter('') }}
+            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors"
+          >
             <X size={11} /> Clear
           </button>
         )}
-        {hasFilters && (
-          <span className="text-xs text-muted-foreground">{resultCount} of {totalCount}</span>
+        {(search || supplierFilter || stockFilter) && (
+          <span className="text-xs text-muted-foreground">
+            {resultCount} of {totalCount}
+          </span>
         )}
       </div>
     </div>
@@ -334,8 +360,9 @@ export default function EbayTab() {
   const [chartData,     setChartData]     = useState([])
   const [loading,       setLoading]       = useState(true)
   const [chartLoading,  setChartLoading]  = useState(true)
-  const [selectedStore, setSelectedStore] = useState(null)
+  const [selectedStore, setSelectedStore] = useState(null)  // store_name string | null
 
+  // ── Filter state ──────────────────────────────────────────────────────────
   const [search,         setSearch]         = useState('')
   const [supplierFilter, setSupplierFilter] = useState('')
   const [stockFilter,    setStockFilter]    = useState('')
@@ -343,8 +370,15 @@ export default function EbayTab() {
   useEffect(() => {
     async function load() {
       setLoading(true)
-      const data = await api.get('/api/ebay/summary')
-      if (Array.isArray(data)) setSummary(data)
+      const { data } = await supabase
+        .from('ebay_store_summary')
+        .select('*')
+        .order('snapshot_date', { ascending: false })
+      if (data) {
+        const seen = {}
+        data.forEach(r => { if (!seen[r.store_name]) seen[r.store_name] = r })
+        setSummary(Object.values(seen))
+      }
       setLoading(false)
     }
     load()
@@ -355,8 +389,12 @@ export default function EbayTab() {
       setChartLoading(true)
       const since = new Date()
       since.setDate(since.getDate() - 30)
-      const data = await api.get(`/api/ebay/chart?since=${since.toISOString().slice(0, 10)}`)
-      if (Array.isArray(data)) {
+      const { data } = await supabase
+        .from('ebay_store_summary')
+        .select('snapshot_date, total_items, active_listings, out_of_stock')
+        .gte('snapshot_date', since.toISOString().slice(0, 10))
+        .order('snapshot_date', { ascending: true })
+      if (data) {
         const byDate = {}
         data.forEach(r => {
           if (!byDate[r.snapshot_date])
@@ -372,10 +410,16 @@ export default function EbayTab() {
     loadChart()
   }, [])
 
+  // ── Client-side filtering ─────────────────────────────────────────────────
   const filteredSummary = useMemo(() => {
     return summary.filter(store => {
-      if (search && !store.store_name.toLowerCase().includes(search.toLowerCase())) return false
-      if (supplierFilter && Number(store[supplierFilter] || 0) === 0) return false
+      if (search) {
+        const q = search.toLowerCase()
+        if (!store.store_name.toLowerCase().includes(q)) return false
+      }
+      if (supplierFilter) {
+        if (Number(store[supplierFilter] || 0) === 0) return false
+      }
       if (stockFilter === 'in'  && Number(store.active_listings || 0) === 0) return false
       if (stockFilter === 'out' && Number(store.out_of_stock    || 0) === 0) return false
       return true
@@ -391,41 +435,83 @@ export default function EbayTab() {
   const first = chartData[0]
   const last  = chartData[chartData.length - 1]
   const noData = !loading && summary.length === 0
+
   const storeCols = filteredSummary.length === 1 ? 1 : filteredSummary.length >= 5 ? 3 : 2
 
+  // ── Store listings page ───────────────────────────────────────────────────
   if (selectedStore) {
-    return <StoreListingsPage storeName={selectedStore} onBack={() => setSelectedStore(null)} />
+    return (
+      <StoreListingsPage
+        storeName={selectedStore}
+        onBack={() => setSelectedStore(null)}
+      />
+    )
   }
 
   return (
     <div className="p-6 space-y-6">
+
+      {/* ── Top summary cards ── */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <SummaryCard label="Total Listings" value={totals.total_items}
+        <SummaryCard
+          label="Total Listings"
+          value={totals.total_items}
           trendPct={first && last ? pctChange(last.total, first.total) : null}
-          trendLabel="total this period" subLabel="All eBay store listings" loading={loading || chartLoading} />
-        <SummaryCard label="Active Listings" value={totals.active_listings}
+          trendLabel="total this period"
+          subLabel="All eBay store listings"
+          loading={loading || chartLoading}
+        />
+        <SummaryCard
+          label="Active Listings"
+          value={totals.active_listings}
           trendPct={first && last ? pctChange(last.active, first.active) : null}
-          trendLabel="active this period" subLabel="Currently in stock & live" loading={loading || chartLoading} />
-        <SummaryCard label="Out of Stock" value={totals.out_of_stock}
+          trendLabel="active this period"
+          subLabel="Currently in stock & live"
+          loading={loading || chartLoading}
+        />
+        <SummaryCard
+          label="Out of Stock"
+          value={totals.out_of_stock}
           trendPct={first && last ? pctChange(last.out, first.out) : null}
-          trendLabel="out of stock items" subLabel="Needs restocking attention" loading={loading || chartLoading} />
-        <SummaryCard label="Stores" value={summary.length}
-          trendPct={null} trendLabel="connected stores" subLabel="eBay seller accounts tracked" loading={loading} />
+          trendLabel="out of stock items"
+          subLabel="Needs restocking attention"
+          loading={loading || chartLoading}
+        />
+        <SummaryCard
+          label="Stores"
+          value={summary.length}
+          trendPct={null}
+          trendLabel="connected stores"
+          subLabel="eBay seller accounts tracked"
+          loading={loading}
+        />
       </div>
 
+      {/* ── Store cards + right panel ── */}
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-6 items-start">
+
+        {/* Left: store cards */}
         <div className="space-y-4">
           <div className="space-y-3">
-            <p className="text-xs text-muted-foreground font-medium">Stores <span className="opacity-50">({summary.length})</span></p>
+            <p className="text-xs text-muted-foreground font-medium">
+              Stores <span className="opacity-50">({summary.length})</span>
+            </p>
+
+            {/* ── Filter bar ── */}
             {!loading && summary.length > 0 && (
               <StoreFilterBar
-                search={search} onSearch={setSearch}
-                supplierFilter={supplierFilter} onSupplierFilter={setSupplierFilter}
-                stockFilter={stockFilter} onStockFilter={setStockFilter}
-                resultCount={filteredSummary.length} totalCount={summary.length}
+                search={search}
+                onSearch={setSearch}
+                supplierFilter={supplierFilter}
+                onSupplierFilter={setSupplierFilter}
+                stockFilter={stockFilter}
+                onStockFilter={setStockFilter}
+                resultCount={filteredSummary.length}
+                totalCount={summary.length}
               />
             )}
           </div>
+
           {loading ? (
             <div className="grid grid-cols-2 gap-4">
               {Array.from({ length: 4 }).map((_, i) => (
@@ -442,21 +528,32 @@ export default function EbayTab() {
             <div className="flex flex-col items-center justify-center py-20 gap-3">
               <Search size={28} className="text-muted-foreground/30" />
               <p className="text-sm text-muted-foreground font-medium">No stores match your filters</p>
-              <button onClick={() => { setSearch(''); setSupplierFilter(''); setStockFilter('') }}
-                className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 transition-colors">
+              <button
+                onClick={() => { setSearch(''); setSupplierFilter(''); setStockFilter('') }}
+                className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 transition-colors"
+              >
                 Clear filters
               </button>
             </div>
           ) : (
-            <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${storeCols}, minmax(0, 1fr))` }}>
+            <div
+              className="grid gap-4"
+              style={{ gridTemplateColumns: `repeat(${storeCols}, minmax(0, 1fr))` }}
+            >
               {filteredSummary.map(store => (
                 <StoreCard key={store.store_name} store={store} onSelect={setSelectedStore} />
               ))}
             </div>
           )}
         </div>
+
+        {/* Right: charts — sticky */}
         <div className="space-y-4 xl:sticky xl:top-6">
-          <ActiveRateRadial total={totals.total_items || 0} active={totals.active_listings || 0} loading={loading} />
+          <ActiveRateRadial
+            total={totals.total_items || 0}
+            active={totals.active_listings || 0}
+            loading={loading}
+          />
           <SupplierPieChart summary={summary} />
         </div>
       </div>
