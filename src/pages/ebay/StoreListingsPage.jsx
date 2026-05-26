@@ -1,5 +1,5 @@
 // StoreListingsPage.jsx — src/pages/ebay/StoreListingsPage.jsx
-import React, { useState, useEffect, useMemo, useRef } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { api } from '../../lib/api'
 import {
   ArrowLeft, Search, X, SlidersHorizontal,
@@ -76,7 +76,7 @@ function ListingsFilterBar({ search, onSearch, stockFilter, onStockFilter, resul
             <X size={11} /> Clear
           </button>
         )}
-        {hasFilters && <span className="text-xs text-muted-foreground">{resultCount} of {totalCount}</span>}
+        {<span className="text-xs text-muted-foreground">{fmt(resultCount)} of {fmt(totalCount)}</span>}
       </div>
     </div>
   )
@@ -119,57 +119,59 @@ export default function StoreListingsPage({ storeName, onBack }) {
   const [page,        setPage]        = useState(0)
   const [search,      setSearch]      = useState('')
   const [stockFilter, setStockFilter] = useState('')
+  const [searchInput, setSearchInput] = useState('')
+  const [snapshotDate, setSnapshotDate] = useState(null)
 
+  // Debounce search
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput), 400)
+    return () => clearTimeout(t)
+  }, [searchInput])
+
+  // Reset page when filters change
+  useEffect(() => { setPage(0) }, [search, stockFilter])
+
+  // Fetch stats once on mount
+  useEffect(() => {
+    async function loadStats() {
+      const res = await api.get(`/api/ebay/listings?store_name=${encodeURIComponent(storeName)}&page=0&limit=1`)
+      if (res?.data?.[0]) setSnapshotDate(res.data[0].snapshot_date)
+      // get counts
+      const [inRes, outRes, totalRes] = await Promise.all([
+        api.get(`/api/ebay/listings?store_name=${encodeURIComponent(storeName)}&stock=in&page=0&limit=1`),
+        api.get(`/api/ebay/listings?store_name=${encodeURIComponent(storeName)}&stock=out&page=0&limit=1`),
+        api.get(`/api/ebay/listings?store_name=${encodeURIComponent(storeName)}&page=0&limit=1`),
+      ])
+      setInStock(inRes?.count || 0)
+      setOutOfStock(outRes?.count || 0)
+      setTotalCount(totalRes?.count || 0)
+    }
+    loadStats()
+  }, [storeName])
+
+  // Fetch current page
   useEffect(() => {
     let cancelled = false
     async function load() {
       setLoading(true)
-      const allRows = []
-      let pg = 0
-      const LIMIT = 1000
-
-      while (true) {
-        const params = new URLSearchParams({
-          store_name: storeName,
-          page: pg,
-          limit: LIMIT,
-        })
-        const res = await api.get(`/api/ebay/listings?${params}`)
-        if (cancelled) return
-        if (!res?.data?.length) break
-        allRows.push(...res.data)
-        if (allRows.length >= res.count) break
-        pg++
-      }
-
+      const params = new URLSearchParams({
+        store_name: storeName,
+        page,
+        limit: PAGE_SIZE,
+        ...(search      && { search }),
+        ...(stockFilter && { stock: stockFilter }),
+      })
+      const res = await api.get(`/api/ebay/listings?${params}`)
       if (cancelled) return
-      setListings(allRows)
-      setTotalCount(allRows.length)
-      setInStock(allRows.filter(r => Number(r.quantity) > 0).length)
-      setOutOfStock(allRows.filter(r => Number(r.quantity) === 0).length)
+      setListings(res?.data || [])
+      setTotalCount(res?.count || 0)
       setLoading(false)
     }
     load()
     return () => { cancelled = true }
-  }, [storeName])
+  }, [storeName, page, search, stockFilter])
 
-  const filtered = useMemo(() => {
-    return listings.filter(r => {
-      if (search) {
-        const q = search.toLowerCase()
-        if (!r.sku?.toLowerCase().includes(q) && !r.item_id?.toLowerCase().includes(q)) return false
-      }
-      if (stockFilter === 'in'  && Number(r.quantity) === 0) return false
-      if (stockFilter === 'out' && Number(r.quantity) > 0)   return false
-      if (stockFilter === 'low' && (Number(r.quantity) === 0 || Number(r.quantity) > 3)) return false
-      return true
-    })
-  }, [listings, search, stockFilter])
-
-  useEffect(() => { setPage(0) }, [search, stockFilter])
-
-  const pageCount = Math.ceil(filtered.length / PAGE_SIZE)
-  const paginated = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+  const pageCount = Math.ceil(totalCount / PAGE_SIZE)
   const hasFilters = search || stockFilter
 
   return (
@@ -184,9 +186,9 @@ export default function StoreListingsPage({ storeName, onBack }) {
           <span className="text-xs text-gray-400 shrink-0">— eBay Listings</span>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          {!loading && listings.length > 0 && (
+          {snapshotDate && (
             <span className="text-[10px] text-gray-400 font-medium">
-              Latest snapshot: {fmtDate(listings[0]?.snapshot_date)}
+              Latest snapshot: {fmtDate(snapshotDate)}
             </span>
           )}
         </div>
@@ -194,21 +196,17 @@ export default function StoreListingsPage({ storeName, onBack }) {
 
       <div className="p-5 space-y-5">
         <div className="flex gap-3 flex-wrap">
-          <StatCard label="Total Listings"  value={fmt(totalCount)} icon={Hash}       loading={loading} />
-          <StatCard label="In Stock"        value={fmt(inStock)}    icon={TrendingUp}  loading={loading} />
-          <StatCard label="Out of Stock"    value={fmt(outOfStock)} icon={AlertCircle} loading={loading} />
-          <StatCard label="Showing"
-            value={hasFilters ? `${fmt(filtered.length)} filtered` : fmt(totalCount)}
-            icon={Package} loading={loading} />
+          <StatCard label="Total Listings"  value={fmt(totalCount)} icon={Hash}       loading={false} />
+          <StatCard label="In Stock"        value={fmt(inStock)}    icon={TrendingUp}  loading={false} />
+          <StatCard label="Out of Stock"    value={fmt(outOfStock)} icon={AlertCircle} loading={false} />
+          <StatCard label="Page"            value={`${page + 1} / ${pageCount || 1}`} icon={Package} loading={false} />
         </div>
 
-        {!loading && listings.length > 0 && (
-          <ListingsFilterBar
-            search={search} onSearch={setSearch}
-            stockFilter={stockFilter} onStockFilter={setStockFilter}
-            resultCount={filtered.length} totalCount={totalCount} loading={loading}
-          />
-        )}
+        <ListingsFilterBar
+          search={searchInput} onSearch={setSearchInput}
+          stockFilter={stockFilter} onStockFilter={setStockFilter}
+          resultCount={totalCount} totalCount={totalCount}
+        />
 
         {loading ? (
           <div className="border border-gray-100 rounded-xl overflow-hidden">
@@ -225,7 +223,7 @@ export default function StoreListingsPage({ storeName, onBack }) {
                   <tr key={i} className="border-b border-gray-50">
                     {[4, 3, 2, 5, 3].map((w, j) => (
                       <td key={j} className="px-4 py-3">
-                        <div className={`h-3 bg-gray-100 rounded animate-pulse w-${w}/5`} />
+                        <div className={`h-3 bg-gray-100 rounded animate-pulse`} style={{ width: `${w * 15}%` }} />
                       </td>
                     ))}
                   </tr>
@@ -235,14 +233,9 @@ export default function StoreListingsPage({ storeName, onBack }) {
           </div>
         ) : listings.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 gap-3">
-            <Package size={32} className="text-muted-foreground/20" />
-            <p className="text-sm text-muted-foreground font-medium">No listings found for {storeName}</p>
-          </div>
-        ) : paginated.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-24 gap-3">
             <Search size={32} className="text-muted-foreground/20" />
             <p className="text-sm text-muted-foreground font-medium">No listings match your filters</p>
-            <button onClick={() => { setSearch(''); setStockFilter('') }}
+            <button onClick={() => { setSearchInput(''); setStockFilter('') }}
               className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 transition-colors">
               Clear filters
             </button>
@@ -263,7 +256,7 @@ export default function StoreListingsPage({ storeName, onBack }) {
                 </tr>
               </thead>
               <tbody>
-                {paginated.map(listing => <ListingRow key={listing.id} listing={listing} />)}
+                {listings.map(listing => <ListingRow key={listing.id} listing={listing} />)}
               </tbody>
             </table>
           </div>
@@ -272,7 +265,7 @@ export default function StoreListingsPage({ storeName, onBack }) {
         {pageCount > 1 && (
           <div className="flex items-center justify-between pt-4 border-t border-gray-100">
             <p className="text-xs text-gray-400">
-              Showing {(page * PAGE_SIZE + 1).toLocaleString()}–{Math.min((page + 1) * PAGE_SIZE, filtered.length).toLocaleString()} of {filtered.length.toLocaleString()} listings
+              Showing {(page * PAGE_SIZE + 1).toLocaleString()}–{Math.min((page + 1) * PAGE_SIZE, totalCount).toLocaleString()} of {totalCount.toLocaleString()} listings
             </p>
             <div className="flex items-center gap-1">
               <button onClick={() => setPage(0)} disabled={page === 0} className="px-2 py-1.5 text-xs border border-gray-200 rounded-lg text-gray-400 hover:bg-gray-50 disabled:opacity-30">«</button>
