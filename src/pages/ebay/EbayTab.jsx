@@ -17,6 +17,11 @@ import {
 } from '@/components/ui/chart'
 import StoreListingsPage from './StoreListingsPage'
 
+// ─── Cache (persists while app is open) ──────────────────────────────────────
+const SUMMARY_CACHE = { data: null, ts: 0 }
+const CHART_CACHE   = { data: null, ts: 0 }
+const STALE_MS      = 60_000 // 1 min
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmt = n => Number(n || 0).toLocaleString()
 
@@ -67,9 +72,8 @@ function TrendBadge({ pct }) {
   const up = pct > 0
   return (
     <span className={`inline-flex items-center gap-1 text-xs border rounded-full px-2 py-0.5 ${
-      up
-        ? 'text-emerald-700 border-emerald-200 bg-emerald-50'
-        : 'text-red-600 border-red-200 bg-red-50'
+      up ? 'text-emerald-700 border-emerald-200 bg-emerald-50'
+         : 'text-red-600 border-red-200 bg-red-50'
     }`}>
       {up ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
       {up ? '+' : ''}{pct}%
@@ -120,7 +124,6 @@ function SupplierPieChart({ summary }) {
   const config = Object.fromEntries(
     pieData.map(s => [s.supplier, { label: s.supplier, color: s.fill }])
   )
-
   const top = [...pieData].sort((a, b) => b.items - a.items)[0]
 
   return (
@@ -136,14 +139,8 @@ function SupplierPieChart({ summary }) {
         >
           <PieChart>
             <ChartTooltip content={<ChartTooltipContent nameKey="supplier" hideLabel />} />
-            <Pie
-              data={pieData}
-              dataKey="items"
-              nameKey="supplier"
-              label={({ supplier }) => supplier}
-              labelLine={true}
-              outerRadius={85}
-            />
+            <Pie data={pieData} dataKey="items" nameKey="supplier"
+              label={({ supplier }) => supplier} labelLine outerRadius={85} />
           </PieChart>
         </ChartContainer>
       </CardContent>
@@ -174,37 +171,25 @@ function ActiveRateRadial({ total, active, loading }) {
       </CardHeader>
       <CardContent className="flex-1 pb-0">
         <ChartContainer config={config} className="mx-auto aspect-square max-h-[220px]">
-          <RadialBarChart
-            data={chartData}
-            endAngle={(pct / 100) * 360}
-            innerRadius={65}
-            outerRadius={95}
-          >
-            <PolarGrid
-              gridType="circle"
-              radialLines={false}
-              stroke="none"
-              className="first:fill-muted last:fill-background"
-              polarRadius={[86, 74]}
-            />
+          <RadialBarChart data={chartData} endAngle={(pct / 100) * 360} innerRadius={65} outerRadius={95}>
+            <PolarGrid gridType="circle" radialLines={false} stroke="none"
+              className="first:fill-muted last:fill-background" polarRadius={[86, 74]} />
             <RadialBar dataKey="value" background />
             <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
-              <Label
-                content={({ viewBox }) => {
-                  if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
-                    return (
-                      <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
-                        <tspan x={viewBox.cx} y={viewBox.cy} className="fill-foreground text-4xl font-bold" fontSize={32} fontWeight={700}>
-                          {loading ? '—' : `${pct}%`}
-                        </tspan>
-                        <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 24} className="fill-muted-foreground" fontSize={12}>
-                          In stock
-                        </tspan>
-                      </text>
-                    )
-                  }
-                }}
-              />
+              <Label content={({ viewBox }) => {
+                if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
+                  return (
+                    <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
+                      <tspan x={viewBox.cx} y={viewBox.cy} className="fill-foreground text-4xl font-bold" fontSize={32} fontWeight={700}>
+                        {loading ? '—' : `${pct}%`}
+                      </tspan>
+                      <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 24} className="fill-muted-foreground" fontSize={12}>
+                        In stock
+                      </tspan>
+                    </text>
+                  )
+                }
+              }} />
             </PolarRadiusAxis>
           </RadialBarChart>
         </ChartContainer>
@@ -214,9 +199,7 @@ function ActiveRateRadial({ total, active, loading }) {
           {fmt(active)} of {fmt(total)} listings active
           <TrendingUp className="h-4 w-4" />
         </div>
-        <div className="leading-none text-muted-foreground text-xs">
-          Total eBay scraper inventory
-        </div>
+        <div className="leading-none text-muted-foreground text-xs">Total eBay scraper inventory</div>
       </CardFooter>
     </Card>
   )
@@ -229,17 +212,14 @@ function StatRow({ items }) {
   return (
     <div className="flex border-border pt-5">
       {cells.map((item, i) => {
-        const hasContent = !!item.label
+        const hasContent  = !!item.label
         const prevContent = i > 0 && !!cells[i - 1].label
         return (
-          <div
-            key={i}
-            className={`flex-1 min-w-0 ${hasContent && prevContent ? 'border-l border-border pl-4' : ''} ${hasContent && i < 2 && cells[i + 1]?.label ? 'pr-4' : ''}`}
-          >
+          <div key={i} className={`flex-1 min-w-0
+            ${hasContent && prevContent ? 'border-l border-border pl-4' : ''}
+            ${hasContent && i < 2 && cells[i + 1]?.label ? 'pr-4' : ''}`}>
             {hasContent && <>
-              <p className="text-[9px] font-semibold uppercase tracking-widest text-muted-foreground mb-2 truncate">
-                {item.label}
-              </p>
+              <p className="text-[9px] font-semibold uppercase tracking-widest text-muted-foreground mb-2 truncate">{item.label}</p>
               <p className="text-xl font-bold text-foreground leading-none">{item.val}</p>
             </>}
           </div>
@@ -266,17 +246,13 @@ function StoreCard({ store, onSelect }) {
       onClick={() => onSelect(store.store_name)}
       className="text-left bg-card border border-black/70 rounded-2xl p-7 w-full shadow-sm transition-all duration-300 ease-out hover:shadow-[0_12px_30px_rgba(0,0,0,0.18)] hover:-translate-y-1 hover:cursor-pointer"
     >
-      <h3 className="text-2xl font-black text-foreground mb-4 capitalize leading-tight">
-        {store.store_name}
-      </h3>
+      <h3 className="text-2xl font-black text-foreground mb-4 capitalize leading-tight">{store.store_name}</h3>
       <StatRow items={[
         { label: 'All Items',    val: fmt(total)  },
         { label: 'Active',       val: fmt(active) },
         { label: 'Out of Stock', val: fmt(oos)    },
       ]} />
-      {supChunks.map((chunk, i) => (
-        <StatRow key={i} items={chunk} />
-      ))}
+      {supChunks.map((chunk, i) => <StatRow key={i} items={chunk} />)}
     </button>
   )
 }
@@ -288,8 +264,7 @@ function StoreFilterBar({ search, onSearch, supplierFilter, onSupplierFilter, st
     <div className="flex flex-wrap items-center gap-3">
       <div className="relative flex-1 min-w-[200px] max-w-xs">
         <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-        <input
-          type="text" value={search} onChange={e => onSearch(e.target.value)}
+        <input type="text" value={search} onChange={e => onSearch(e.target.value)}
           placeholder="Search stores…"
           className="w-full pl-8 pr-8 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent placeholder:text-muted-foreground/60 transition-all"
         />
@@ -320,9 +295,7 @@ function StoreFilterBar({ search, onSearch, supplierFilter, onSupplierFilter, st
             <X size={11} /> Clear
           </button>
         )}
-        {hasFilters && (
-          <span className="text-xs text-muted-foreground">{resultCount} of {totalCount}</span>
-        )}
+        {hasFilters && <span className="text-xs text-muted-foreground">{resultCount} of {totalCount}</span>}
       </div>
     </div>
   )
@@ -330,29 +303,44 @@ function StoreFilterBar({ search, onSearch, supplierFilter, onSupplierFilter, st
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 export default function EbayTab() {
-  const [summary,       setSummary]       = useState([])
-  const [chartData,     setChartData]     = useState([])
-  const [loading,       setLoading]       = useState(true)
-  const [chartLoading,  setChartLoading]  = useState(true)
+  // Init state from cache immediately — no loading flash on revisit
+  const [summary,       setSummary]       = useState(SUMMARY_CACHE.data || [])
+  const [chartData,     setChartData]     = useState(CHART_CACHE.data   || [])
+  const [loading,       setLoading]       = useState(!SUMMARY_CACHE.data)
+  const [chartLoading,  setChartLoading]  = useState(!CHART_CACHE.data)
   const [selectedStore, setSelectedStore] = useState(null)
 
   const [search,         setSearch]         = useState('')
   const [supplierFilter, setSupplierFilter] = useState('')
   const [stockFilter,    setStockFilter]    = useState('')
 
+  // ── Load summary with stale-while-revalidate ──────────────────────────────
   useEffect(() => {
     async function load() {
-      setLoading(true)
+      // If cache is fresh, skip fetch entirely
+      if (SUMMARY_CACHE.data && Date.now() - SUMMARY_CACHE.ts < STALE_MS) return
+
+      // If we have stale cache, show it without spinner and revalidate in background
+      if (!SUMMARY_CACHE.data) setLoading(true)
+
       const data = await api.get('/api/ebay/summary')
-      if (Array.isArray(data)) setSummary(data)
+      if (Array.isArray(data)) {
+        setSummary(data)
+        SUMMARY_CACHE.data = data
+        SUMMARY_CACHE.ts   = Date.now()
+      }
       setLoading(false)
     }
     load()
   }, [])
 
+  // ── Load chart with stale-while-revalidate ────────────────────────────────
   useEffect(() => {
     async function loadChart() {
-      setChartLoading(true)
+      if (CHART_CACHE.data && Date.now() - CHART_CACHE.ts < STALE_MS) return
+
+      if (!CHART_CACHE.data) setChartLoading(true)
+
       const since = new Date()
       since.setDate(since.getDate() - 30)
       const data = await api.get(`/api/ebay/chart?since=${since.toISOString().slice(0, 10)}`)
@@ -365,7 +353,10 @@ export default function EbayTab() {
           byDate[r.snapshot_date].active += Number(r.active_listings || 0)
           byDate[r.snapshot_date].out    += Number(r.out_of_stock    || 0)
         })
-        setChartData(Object.values(byDate))
+        const parsed = Object.values(byDate)
+        setChartData(parsed)
+        CHART_CACHE.data = parsed
+        CHART_CACHE.ts   = Date.now()
       }
       setChartLoading(false)
     }
@@ -388,9 +379,9 @@ export default function EbayTab() {
     out_of_stock:    (acc.out_of_stock    || 0) + Number(s.out_of_stock    || 0),
   }), {})
 
-  const first = chartData[0]
-  const last  = chartData[chartData.length - 1]
-  const noData = !loading && summary.length === 0
+  const first    = chartData[0]
+  const last     = chartData[chartData.length - 1]
+  const noData   = !loading && summary.length === 0
   const storeCols = filteredSummary.length === 1 ? 1 : filteredSummary.length >= 5 ? 3 : 2
 
   if (selectedStore) {
