@@ -180,8 +180,8 @@ export default function ProductsTab() {
   const [filteredCount, setFilteredCount] = useState(0)
   const pageCount = Math.ceil(filteredCount / PAGE_SIZE)
 
-  const [totalCount,    setTotalCount]    = useState(LEGACY_STATS_CACHE.total || 0)
-  const [inStockCount,  setInStockCount]  = useState(LEGACY_STATS_CACHE.inStock || 0)
+  const [totalCount,    setTotalCount]    = useState(LEGACY_STATS_CACHE.total    || 0)
+  const [inStockCount,  setInStockCount]  = useState(LEGACY_STATS_CACHE.inStock  || 0)
   const [outStockCount, setOutStockCount] = useState(LEGACY_STATS_CACHE.outStock || 0)
   const [avgPrice,      setAvgPrice]      = useState(LEGACY_STATS_CACHE.avgPrice || '0.00')
   const [totalItems,    setTotalItems]    = useState(LEGACY_STATS_CACHE.totalItems || 0)
@@ -192,7 +192,7 @@ export default function ProductsTab() {
   // Reset page when filters/sort change
   useEffect(() => { setPage(0) }, [filterKey, sortBy, sortDir])
 
-  // ── Load meta (suppliers, categories, override skus) once ────────────────
+  // ── Load meta once ───────────────────────────────────────────────────────
   useEffect(() => {
     async function loadMeta() {
       const [supps, cats, ovSkus] = await Promise.all([
@@ -210,7 +210,7 @@ export default function ProductsTab() {
     loadMeta()
   }, [])
 
-  // ── PAGE FETCH ────────────────────────────────────────────────────────────
+  // ── Page fetch ───────────────────────────────────────────────────────────
   const fetchPage = useCallback(async () => {
     const cacheKey = getPageCacheKey(filterKey, page, sortBy, sortDir)
     const cached   = getPageCache(cacheKey)
@@ -226,15 +226,15 @@ export default function ProductsTab() {
 
     const params = new URLSearchParams({
       page, limit: PAGE_SIZE, sort: sortBy, dir: sortDir,
-      ...(filterState.filterOverride ? { override: 'true' } : {}),
-      ...(filterState.search       ? { search: filterState.search }             : {}),
-      ...(filterState.filterCategory  ? { category: filterState.filterCategory }   : {}),
-      ...(filterState.filterStock     ? { stock: filterState.filterStock }         : {}),
-      ...(filterState.filterSupplier  ? { supplier_id: filterState.filterSupplier }: {}),
-      ...(filterState.filterMinQty    ? { minQty: filterState.filterMinQty }       : {}),
-      ...(filterState.filterMinPrice  ? { minPrice: filterState.filterMinPrice }   : {}),
-      ...(filterState.filterMaxPrice  ? { maxPrice: filterState.filterMaxPrice }   : {}),
-      ...(filterState.filterFreshness ? { freshness: filterState.filterFreshness } : {}),
+      ...(filterState.filterOverride  ? { override: 'true' }                         : {}),
+      ...(filterState.search          ? { search: filterState.search }               : {}),
+      ...(filterState.filterCategory  ? { category: filterState.filterCategory }     : {}),
+      ...(filterState.filterStock     ? { stock: filterState.filterStock }           : {}),
+      ...(filterState.filterSupplier  ? { supplier_id: filterState.filterSupplier }  : {}),
+      ...(filterState.filterMinQty    ? { minQty: filterState.filterMinQty }         : {}),
+      ...(filterState.filterMinPrice  ? { minPrice: filterState.filterMinPrice }     : {}),
+      ...(filterState.filterMaxPrice  ? { maxPrice: filterState.filterMaxPrice }     : {}),
+      ...(filterState.filterFreshness ? { freshness: filterState.filterFreshness }   : {}),
     })
 
     const res = await api.get(`/api/products?${params}`)
@@ -246,15 +246,15 @@ export default function ProductsTab() {
     setLoading(false)
   }, [filterKey, page, sortBy, sortDir, filterState])
 
-  // ── STATS FETCH ───────────────────────────────────────────────────────────
+  // ── Stats fetch ──────────────────────────────────────────────────────────
   const fetchStats = useCallback(async () => {
     const cached = STATS_CACHE.get(filterKey)
     if (cached) {
-      setTotalCount(cached.total)
-      setInStockCount(cached.inStock)
-      setOutStockCount(cached.outStock)
-      setAvgPrice(cached.avgPrice)
-      setTotalItems(cached.totalItems)
+      setTotalCount(cached.total    || 0)
+      setInStockCount(cached.inStock  || 0)
+      setOutStockCount(cached.outStock || 0)
+      setAvgPrice(cached.avgPrice   || '0.00')
+      setTotalItems(cached.totalItems || 0)
       setStatsLoading(false)
       if (Date.now() - cached.ts < STALE_MS) return
     } else {
@@ -262,24 +262,24 @@ export default function ProductsTab() {
     }
 
     const params = new URLSearchParams({
-      ...(filterState.filterOverride  ? { override: 'true' }                        : {}),
-      ...(filterState.search          ? { search: filterState.search }              : {}),
-      ...(filterState.filterCategory  ? { category: filterState.filterCategory }    : {}),
-      ...(filterState.filterStock     ? { stock: filterState.filterStock }          : {}),
-      ...(filterState.filterSupplier  ? { supplier_id: filterState.filterSupplier } : {}),
-      ...(filterState.filterMinQty    ? { minQty: filterState.filterMinQty }        : {}),
-      ...(filterState.filterMinPrice  ? { minPrice: filterState.filterMinPrice }    : {}),
-      ...(filterState.filterMaxPrice  ? { maxPrice: filterState.filterMaxPrice }    : {}),
-      ...(filterState.filterFreshness ? { freshness: filterState.filterFreshness }  : {}),
+      ...(filterState.filterOverride  ? { override: 'true' }                         : {}),
+      ...(filterState.search          ? { search: filterState.search }               : {}),
+      ...(filterState.filterCategory  ? { category: filterState.filterCategory }     : {}),
+      ...(filterState.filterStock     ? { stock: filterState.filterStock }           : {}),
+      ...(filterState.filterSupplier  ? { supplier_id: filterState.filterSupplier }  : {}),
+      ...(filterState.filterMinQty    ? { minQty: filterState.filterMinQty }         : {}),
+      ...(filterState.filterMinPrice  ? { minPrice: filterState.filterMinPrice }     : {}),
+      ...(filterState.filterMaxPrice  ? { maxPrice: filterState.filterMaxPrice }     : {}),
+      ...(filterState.filterFreshness ? { freshness: filterState.filterFreshness }   : {}),
     })
 
     const stats = await api.get(`/api/products/stats?${params}`)
     if (stats) {
-      setTotalCount(stats.total)
-      setInStockCount(stats.inStock)
-      setOutStockCount(stats.outStock)
-      setAvgPrice(stats.avgPrice)
-      setTotalItems(stats.totalItems)
+      setTotalCount(stats.total      || 0)
+      setInStockCount(stats.inStock   || 0)
+      setOutStockCount(stats.outStock  || 0)
+      setAvgPrice(stats.avgPrice    || '0.00')
+      setTotalItems(stats.totalItems || 0)
       STATS_CACHE.set(filterKey, { ...stats, ts: Date.now() })
     }
     setStatsLoading(false)
@@ -399,13 +399,13 @@ export default function ProductsTab() {
       <div className="p-5">
         {/* Summary cards */}
         <div className="flex gap-3 mb-5">
-          <SummaryCard label="Total products"  value={totalCount.toLocaleString()}    loading={statsLoading} />
-          <SummaryCard label="In stock"         value={inStockCount.toLocaleString()}  loading={statsLoading} />
-          <SummaryCard label="Out of stock"     value={outStockCount.toLocaleString()} loading={statsLoading} />
-          <SummaryCard label="Avg. price"       value={`$${avgPrice}`}                 loading={statsLoading} />
+          <SummaryCard label="Total products"  value={(totalCount   || 0).toLocaleString()} loading={statsLoading} />
+          <SummaryCard label="In stock"         value={(inStockCount  || 0).toLocaleString()} loading={statsLoading} />
+          <SummaryCard label="Out of stock"     value={(outStockCount || 0).toLocaleString()} loading={statsLoading} />
+          <SummaryCard label="Avg. price"       value={`$${avgPrice || '0.00'}`}              loading={statsLoading} />
           <SummaryCard
             label={hasFilters ? 'Matching items' : 'Total items (incl. variants)'}
-            value={totalItems.toLocaleString()}
+            value={(totalItems || 0).toLocaleString()}
             loading={statsLoading}
           />
         </div>

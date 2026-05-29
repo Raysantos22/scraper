@@ -1,5 +1,4 @@
 // ProductFiltersBar.jsx — src/pages/products/ProductFiltersBar.jsx
-// OPTIMIZED: Added Enter key support, improved search UX
 import React, { useState, useEffect, useRef } from 'react'
 import { Search, ChevronDown, X, Loader2 } from 'lucide-react'
 
@@ -28,6 +27,46 @@ export const FilterDropdown = React.memo(function FilterDropdown({ label, option
             <button key={opt} onClick={() => { onChange(opt); setOpen(false) }}
               className={`w-full text-left px-4 py-2 text-xs hover:bg-gray-50 ${value === opt ? 'text-red-600 font-medium' : 'text-gray-700'}`}>
               {opt}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+})
+
+// ─── Freshness dropdown (sends numeric days to server) ────────────────────────
+const FRESHNESS_OPTIONS = [
+  { label: 'Last 24 hours', value: '1'  },
+  { label: 'Last 7 days',   value: '7'  },
+  { label: 'Last 30 days',  value: '30' },
+]
+
+export const FreshnessDropdown = React.memo(function FreshnessDropdown({ value, onChange }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
+    document.addEventListener('mousedown', h)
+    return () => document.removeEventListener('mousedown', h)
+  }, [open])
+  const label = FRESHNESS_OPTIONS.find(o => o.value === value)?.label || 'Updated'
+  return (
+    <div className="relative" ref={ref}>
+      <button onClick={() => setOpen(o => !o)}
+        className={`flex items-center gap-1 px-3 py-1.5 text-xs border rounded-lg transition-colors ${
+          value ? 'border-red-300 text-red-600 bg-red-50' : 'border-gray-200 text-gray-400 hover:bg-gray-50'}`}>
+        {label}<ChevronDown size={11} />
+      </button>
+      {open && (
+        <div className="absolute top-full mt-1 left-0 z-50 bg-white border border-gray-100 rounded-xl shadow-lg py-1 min-w-max">
+          <button onClick={() => { onChange(''); setOpen(false) }}
+            className="w-full text-left px-4 py-2 text-xs text-gray-400 hover:bg-gray-50">All</button>
+          {FRESHNESS_OPTIONS.map(o => (
+            <button key={o.value} onClick={() => { onChange(o.value); setOpen(false) }}
+              className={`w-full text-left px-4 py-2 text-xs hover:bg-gray-50 flex items-center justify-between ${value === o.value ? 'text-red-600 font-medium' : 'text-gray-700'}`}>
+              {o.label}{value === o.value && <span className="w-1.5 h-1.5 rounded-full bg-red-500 ml-3" />}
             </button>
           ))}
         </div>
@@ -168,34 +207,38 @@ export default React.memo(function ProductFiltersBar({
   searchInput, setSearchInput, searchLoading,
   filterState, setFilterCategory, setFilterStock, setFilterSupplier,
   setFilterMinQty, setFilterMinPrice, setFilterMaxPrice, setFilterFreshness,
-  hasFilters, clearFilters, categories, supplierOptions,setFilterOverride,
+  hasFilters, clearFilters, categories, supplierOptions, setFilterOverride,
 }) {
   if (!filterState) return null
-  const { filterCategory, filterStock, filterSupplier, filterMinQty, filterMinPrice, filterMaxPrice, filterFreshness, filterOverride } = filterState
-  const supplierName = filterSupplier ? (supplierOptions.find(s => s.id === filterSupplier)?.name || '') : ''
+  const {
+    filterCategory, filterStock, filterSupplier,
+    filterMinQty, filterMinPrice, filterMaxPrice,
+    filterFreshness, filterOverride,
+  } = filterState
+  const supplierName = filterSupplier
+    ? (supplierOptions.find(s => s.id === filterSupplier)?.name || '')
+    : ''
 
   return (
     <div className="flex items-center gap-2 flex-wrap">
+      {/* Search */}
       <div className="relative">
         {searchLoading
           ? <Loader2 size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 animate-spin" />
           : <Search  size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-300" />}
-        <input 
-          type="text" 
-          value={searchInput} 
+        <input
+          type="text"
+          value={searchInput}
           onChange={e => setSearchInput(e.target.value)}
           onKeyDown={e => {
             if (e.key === 'Enter') {
               e.preventDefault()
-              // Trigger immediate search (no waiting for debounce)
               const trimmed = searchInput.trim()
-              if (trimmed !== searchInput) {
-                setSearchInput(trimmed)
-              }
+              if (trimmed !== searchInput) setSearchInput(trimmed)
             }
           }}
           placeholder="Search title, SKU, brand… (Enter to search)"
-          className="pl-8 pr-7 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-gray-300 placeholder-gray-300 w-64" 
+          className="pl-8 pr-7 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-gray-300 placeholder-gray-300 w-64"
         />
         {searchInput && (
           <button onClick={() => setSearchInput('')}
@@ -204,16 +247,21 @@ export default React.memo(function ProductFiltersBar({
           </button>
         )}
       </div>
+
       <FilterDropdown label="Category" options={categories} value={filterCategory} onChange={setFilterCategory} />
       <FilterDropdown label="Stock" options={['in', 'out', 'low']} value={filterStock} onChange={setFilterStock} />
-      <FilterDropdown label="Supplier" options={supplierOptions.map(s => s.name)} value={supplierName}
-        onChange={name => setFilterSupplier(supplierOptions.find(s => s.name === name)?.id || '')} />
+      <FilterDropdown
+        label="Supplier"
+        options={supplierOptions.map(s => s.name)}
+        value={supplierName}
+        onChange={name => setFilterSupplier(supplierOptions.find(s => s.name === name)?.id || '')}
+      />
       <MinQtyDropdown value={filterMinQty} onChange={setFilterMinQty} />
       <PriceDropdown mode="min" value={filterMinPrice} onChange={setFilterMinPrice} />
       <PriceDropdown mode="max" value={filterMaxPrice} onChange={setFilterMaxPrice} />
-      <FilterDropdown label="Updated" options={['Updated within last 24hrs', '1-7 days', 'Older than 7 days']}
-        value={filterFreshness} onChange={setFilterFreshness} />
-<FilterDropdown label="Override" options={['Edited', 'Not Edited']} value={filterOverride} onChange={setFilterOverride} />
+      <FreshnessDropdown value={filterFreshness} onChange={setFilterFreshness} />
+      <FilterDropdown label="Override" options={['Edited', 'Not Edited']} value={filterOverride} onChange={setFilterOverride} />
+
       {hasFilters && (
         <button onClick={clearFilters} className="text-xs text-red-500 hover:underline">Clear all</button>
       )}

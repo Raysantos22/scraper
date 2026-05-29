@@ -1,8 +1,9 @@
 // C:\Users\ADMIN\scraper\src\pages\Dashboard.jsx
 import { useState } from 'react'
-import { LogOut, Package, ShoppingBag } from 'lucide-react'
+import { LogOut, Package, ShoppingBag, RefreshCw } from 'lucide-react'
 import ProductsTab from './products/ProductsTab'
 import EbayTab from './ebay/EbayTab'
+import SyncTab from './sync/SyncTab'
 
 export default function Dashboard({ session, onLogout }) {
   const [activeTab, setActiveTab] = useState('products')
@@ -15,6 +16,7 @@ export default function Dashboard({ session, onLogout }) {
   const tabs = [
     { id: 'products', label: 'Products', icon: Package },
     { id: 'ebay',     label: 'Stores',   icon: ShoppingBag },
+    { id: 'sync',     label: 'Sync',     icon: RefreshCw },
   ]
 
   return (
@@ -65,6 +67,7 @@ export default function Dashboard({ session, onLogout }) {
         <main className="flex-1 overflow-auto">
           {activeTab === 'products' && <ProductsTab />}
           {activeTab === 'ebay'     && <EbayTab />}
+          {activeTab === 'sync'     && <SyncTab />}
         </main>
       </div>
     </div>
