@@ -1,15 +1,14 @@
-// SyncTab.jsx — matches EbayTab design language exactly
+// StoresTab.jsx — unified Stores + Sync tab
 import React, { useState, useEffect, useMemo } from 'react'
 import { api } from '../../lib/api'
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell,
-  PieChart, Pie, Sector,
   RadialBarChart, RadialBar, PolarGrid, PolarRadiusAxis, Label,
+  PieChart, Pie, Sector, BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell,
 } from 'recharts'
 import {
-  AlertTriangle, CheckCircle2, Search, X, ChevronLeft, ChevronRight,
-  RefreshCw, Download, ShieldAlert, Unlink, Trash2, Activity,
-  ArrowDown, Package, ChevronDown, ChevronUp, TrendingUp,
+  TrendingUp, ShoppingBag, Search, X, SlidersHorizontal,
+  Download, AlertCircle, CheckCircle2, Clock,
+  PackageX, PackageCheck, Package, Zap, ZapOff, ListX,
 } from 'lucide-react'
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter,
@@ -17,13 +16,21 @@ import {
 import {
   ChartContainer, ChartTooltip, ChartTooltipContent,
 } from '@/components/ui/chart'
+import StoreListingsPage from '../ebay/StoreListingsPage'
 
-// ─── Cache ───────────────────────────────────────────────────────────────────
-const STATS_CACHE  = { data: null, ts: 0 }
-const HEALTH_CACHE = { data: null, ts: 0 }
-const STALE_MS     = 60_000
+// ─── Cache ────────────────────────────────────────────────────────────────────
+const STORES_CACHE   = { data: null, ts: 0 }
+const SUMMARY_CACHE  = { data: null, ts: 0 }
+const SUPPLIER_CACHE = { data: null, ts: 0 }
+const STALE_MS       = 60_000
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+const RED   = '#ef4444'
+const PINK  = '#fca5a5'
+const GREEN = '#22c55e'
+const AMBER = '#f59e0b'
+const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmt = n => Number(n || 0).toLocaleString()
 const pct = (n, d) => (d > 0 ? Math.round((Number(n) / Number(d)) * 100) : 0)
 
@@ -39,7 +46,60 @@ function timeAgo(dateStr) {
   return `${days}d ago`
 }
 
-// ─── Skeletons (match EbayTab pattern) ───────────────────────────────────────
+function pairColor(p) {
+  if (p > 80) return 'text-green-600'
+  if (p > 50) return 'text-amber-500'
+  return 'text-red-500'
+}
+
+const SUPPLIERS_DEF = [
+  { key: 'ozh_items',        label: 'OZH',         fill: '#ef4444' },
+  { key: 'priceline_items',  label: 'Priceline',   fill: '#f97316' },
+  { key: 'totaltools_items', label: 'Total Tools', fill: '#eab308' },
+  { key: 'mecca_items',      label: 'Mecca',       fill: '#84cc16' },
+  { key: 'sephora_items',    label: 'Sephora',     fill: '#06b6d4' },
+  { key: 'house_items',      label: 'House',       fill: '#3b82f6' },
+  { key: 'vb_items',         label: "Vic's Bsmt",  fill: '#8b5cf6' },
+  { key: 'amazon_items',     label: 'Amazon',      fill: '#ec4899' },
+  { key: 'other_items',      label: 'Other',       fill: '#64748b' },
+]
+
+const SUPPLIER_API_MAP = [
+  { key: 'amazon',     label: 'Amazon',      fill: '#ec4899', icon: '📦' },
+  { key: 'other',      label: 'Other',       fill: '#64748b', icon: '🏪' },
+  { key: 'totaltools', label: 'Total Tools', fill: '#eab308', icon: '🔧' },
+  { key: 'priceline',  label: 'Priceline',   fill: '#f97316', icon: '💊' },
+  { key: 'mecca',      label: 'Mecca',       fill: '#84cc16', icon: '💄' },
+  { key: 'ozh',        label: 'OZH',         fill: '#ef4444', icon: '✂️' },
+  { key: 'sephora',    label: 'Sephora',     fill: '#06b6d4', icon: '🌸' },
+  { key: 'house',      label: 'House',       fill: '#3b82f6', icon: '🏠' },
+  { key: 'vb',         label: "Vic's Bsmt",  fill: '#8b5cf6', icon: '🛍️' },
+]
+
+function chunkArray(arr, size) {
+  const out = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
+
+// ─── Skeletons ────────────────────────────────────────────────────────────────
+function SkeletonCard() {
+  return (
+    <div className="bg-card border border-border rounded-2xl p-7 w-full animate-pulse">
+      <div className="h-4 w-32 bg-muted rounded mb-2" />
+      <div className="h-3 w-20 bg-muted/60 rounded mb-6" />
+      <div className="flex gap-4 pt-5 border-t border-border">
+        {[0,1,2].map(i => (
+          <div key={i} className="flex-1 space-y-2">
+            <div className="h-2 w-12 bg-muted/60 rounded" />
+            <div className="h-6 w-16 bg-muted rounded" />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function SkeletonSummaryCard() {
   return (
     <Card className="flex-1 min-w-0 animate-pulse">
@@ -54,7 +114,8 @@ function SkeletonSummaryCard() {
     </Card>
   )
 }
-function SkeletonChart({ height = 'h-[220px]' }) {
+
+function SkeletonChart({ height = 'h-[240px]' }) {
   return (
     <Card className="animate-pulse">
       <CardHeader className="pb-2">
@@ -66,298 +127,265 @@ function SkeletonChart({ height = 'h-[220px]' }) {
   )
 }
 
-// ─── Summary stat card — exactly like EbayTab SummaryCard ────────────────────
-function SummaryCard({ label, value, subLabel, accent, Icon, badge, loading }) {
+// ─── Summary card ─────────────────────────────────────────────────────────────
+function SummaryCard({ label, value, subLabel, trendLabel, accent, loading }) {
   if (loading) return <SkeletonSummaryCard />
   return (
     <Card className="flex-1 min-w-0">
       <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-2">
-          <CardDescription className="text-xs font-medium">{label}</CardDescription>
-          <div className="flex items-center gap-1.5">
-            {badge && (
-              <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
-                style={{ background: accent + '20', color: accent }}>{badge}</span>
-            )}
-            {Icon && <Icon size={13} style={{ color: accent }} />}
-          </div>
-        </div>
-        <CardTitle className="text-3xl font-bold tracking-tight" style={{ color: accent }}>
+        <CardDescription className="text-xs font-medium">{label}</CardDescription>
+        <CardTitle className="text-3xl font-bold tracking-tight" style={accent ? { color: accent } : {}}>
           {fmt(value)}
         </CardTitle>
       </CardHeader>
       <CardContent className="pt-0">
-        <p className="text-xs text-muted-foreground">{subLabel}</p>
+        <div className="text-sm font-medium text-foreground">{trendLabel}</div>
+        <p className="text-xs text-muted-foreground mt-0.5">{subLabel}</p>
       </CardContent>
     </Card>
   )
 }
 
-// ─── Problem definitions ─────────────────────────────────────────────────────
-const PROBLEMS = [
-  {
-    key:          'active_no_autods',
-    title:        'eBay Active — No AutoDS',
-    badge:        'HIGH RISK',
-    badgeStyle:   'bg-red-100 text-red-700',
-    cardStyle:    'border-red-200 bg-red-50',
-    titleStyle:   'text-red-800',
-    countColor:   '#ef4444',
-    Icon:         ShieldAlert,
-    iconColor:    '#ef4444',
-    exportStatus: 'active_no_autods',
-    exportBg:     'bg-red-50 border-red-200',
-    what:    'Live eBay listings where AutoDS stopped monitoring the Amazon source — price & stock are frozen.',
-    example: 'Amazon price jumps $18→$52. Your eBay listing still shows $24. You sell it, buy at $52, lose $28 per order.',
-    fix:     'Re-add to AutoDS or end listings immediately.',
-  },
-  {
-    key:          'active_no_skumap',
-    title:        'eBay Active — No SKU Map',
-    badge:        'BLIND',
-    badgeStyle:   'bg-orange-100 text-orange-700',
-    cardStyle:    'border-orange-200 bg-orange-50',
-    titleStyle:   'text-orange-800',
-    countColor:   '#f97316',
-    Icon:         Unlink,
-    iconColor:    '#f97316',
-    exportStatus: 'active_no_skumap',
-    exportBg:     'bg-orange-50 border-orange-200',
-    what:    'Live listings with no Amazon ASIN linked — completely invisible to your monitoring system, forever.',
-    example: 'SKU "A9123456789" is live with qty=5 but not in sku_map. AutoDS has no ASIN to watch. Runs on stale data indefinitely.',
-    fix:     'Export, find the correct ASIN for each SKU, add rows to sku_map.',
-  },
-  {
-    key:          'autods_not_ebay',
-    title:        'AutoDS Monitoring — Not Listed',
-    badge:        'OPPORTUNITY',
-    badgeStyle:   'bg-blue-100 text-blue-700',
-    cardStyle:    'border-blue-200 bg-blue-50',
-    titleStyle:   'text-blue-800',
-    countColor:   '#3b82f6',
-    Icon:         Package,
-    iconColor:    '#3b82f6',
-    exportStatus: null,
-    exportBg:     null,
-    what:    'AutoDS is watching these ASINs but you have no eBay listing for them. Paying to monitor, earning nothing.',
-    example: 'ASIN B0GZKVSJRX: monitored at $43.49, stock=3. No eBay listing. You pay AutoDS, sell nothing.',
-    fix:     'List them on eBay or delete from AutoDS to cut monitoring costs.',
-  },
-  {
-    key:          'dead_no_autods',
-    title:        'eBay Dead — No AutoDS',
-    badge:        'CLEAN UP',
-    badgeStyle:   'bg-gray-100 text-gray-600',
-    cardStyle:    'border-gray-200 bg-gray-50',
-    titleStyle:   'text-gray-700',
-    countColor:   '#6b7280',
-    Icon:         Trash2,
-    iconColor:    '#9ca3af',
-    exportStatus: 'dead_no_autods',
-    exportBg:     'bg-gray-50 border-gray-200',
-    what:    'qty=0 listings with no AutoDS monitoring — dead weight cluttering your store and hurting search rank.',
-    example: 'A USB hub, out of stock 8 months, AutoDS dropped it. Sits at qty=0, invisible to buyers, still counts against store health.',
-    fix:     'Bulk-end via eBay\'s bulk tool. Export list below.',
-  },
-]
-
-// ─── Browse table tabs ────────────────────────────────────────────────────────
-const BROWSE_TABS = [
-  { id: 'unmonitored', label: 'Unmonitored',  endpoint: '/api/sync/unmonitored', desc: 'On eBay, has SKU map, but AutoDS stopped monitoring the ASIN' },
-  { id: 'not-mapped',  label: 'Not Mapped',   endpoint: '/api/sync/not-mapped',  desc: 'On eBay but the eBay SKU is not in sku_map — no ASIN link' },
-  { id: 'autods-only', label: 'AutoDS Only',  endpoint: '/api/sync/autods-only', desc: 'In AutoDS monitoring but no corresponding eBay listing exists' },
-]
-
-// ─── Export button ────────────────────────────────────────────────────────────
-function ExportBtn({ status, label, count, color, bg, BtnIcon, small }) {
-  const [loading, setLoading] = useState(false)
-  const [done, setDone]       = useState(false)
-
-  async function go(e) {
-    e.stopPropagation()
-    if (loading) return
-    setLoading(true); setDone(false)
-    try {
-      const url = `${import.meta.env.VITE_API_URL || ''}/api/sync/export-csv?status=${status}`
-    //   const url = directUrl || `${import.meta.env.VITE_API_URL || ''}/api/sync/export-csv?status=${status}`
-      const res  = await fetch(url)
-      if (!res.ok) throw new Error('Export failed')
-      const blob    = await res.blob()
-      const blobUrl = URL.createObjectURL(blob)
-      const a       = Object.assign(document.createElement('a'), {
-        href: blobUrl,
-        download: `sync_${status}_${new Date().toISOString().slice(0,10)}.csv`,
-      })
-      document.body.appendChild(a); a.click(); document.body.removeChild(a)
-      URL.revokeObjectURL(blobUrl)
-      setDone(true); setTimeout(() => setDone(false), 3000)
-    } catch(e) { console.error(e) }
-    finally { setLoading(false) }
-  }
-
-  const spinner = (
-    <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24" fill="none">
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-    </svg>
-  )
-
-  if (small) return (
-    <button onClick={go} disabled={loading}
-      className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border transition-all
-        ${done ? 'bg-green-50 border-green-300 text-green-700' : `${bg} hover:shadow-sm`}
-        ${loading ? 'opacity-70 cursor-wait' : 'cursor-pointer'}`}>
-      {loading ? spinner : done ? <CheckCircle2 size={12} className="text-green-600" /> : <Download size={12} style={{ color }} />}
-      {loading ? 'Preparing…' : done ? '✓ Downloaded' : `Export ${fmt(count)} SKUs`}
-    </button>
-  )
-
-  return (
-    <button onClick={go} disabled={loading}
-      className={`flex flex-col gap-1 p-3 rounded-xl border-2 transition-all text-left w-full
-        ${done ? 'bg-green-50 border-green-300' : bg}
-        ${loading ? 'opacity-80 cursor-wait' : 'hover:shadow-md cursor-pointer'}`}>
-      <div className="flex items-center justify-between">
-        <BtnIcon size={13} style={{ color: done ? '#22c55e' : color }} />
-        {loading ? spinner : done ? <CheckCircle2 size={10} className="text-green-500" /> : <Download size={10} className="text-muted-foreground" />}
-      </div>
-      <span className="text-xs font-semibold text-foreground mt-1">{label}</span>
-      <span className="text-[11px] text-muted-foreground tabular-nums">
-        {loading ? 'Preparing…' : done ? '✓ Downloaded' : `${fmt(count)} SKUs`}
-      </span>
-    </button>
-  )
-}
-
-// ─── Problem card ─────────────────────────────────────────────────────────────
-function ProblemCard({ p, health, loading }) {
-  const [open, setOpen] = useState(false)
-
-  const countMap = {
-    active_no_autods: health?.active_no_autods,
-    active_no_skumap: health?.active_no_skumap,
-    autods_not_ebay:  health?.autods_not_ebay,
-    dead_no_autods:   (Number(health?.dead_no_autods || 0) + Number(health?.dead_no_skumap || 0)),
-  }
-  const count = countMap[p.key] || 0
-  const Icon  = p.Icon
-
+// ─── Supplier summary cards ───────────────────────────────────────────────────
+function SupplierSummaryCards({ suppliers, loading }) {
   if (loading) return (
-    <Card className="animate-pulse">
-      <CardHeader className="pb-2">
-        <div className="h-3 w-16 bg-muted rounded mb-2" />
-        <div className="h-7 w-24 bg-muted rounded" />
-      </CardHeader>
-      <CardContent><div className="h-3 w-full bg-muted/60 rounded" /></CardContent>
-    </Card>
-  )
-
-  return (
-    <Card className={`overflow-hidden border-2 ${p.cardStyle}`}>
-      <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <span className={`text-[10px] font-bold rounded-full px-2 py-0.5 ${p.badgeStyle}`}>{p.badge}</span>
+    <div className="space-y-2">
+      <p className="text-xs text-muted-foreground font-medium">Supplier Breakdown</p>
+      <div className="grid grid-cols-3 sm:grid-cols-5 xl:grid-cols-9 gap-2">
+        {Array.from({ length: 7 }).map((_, i) => (
+          <div key={i} className="bg-card border border-border rounded-xl p-3 animate-pulse">
+            <div className="h-2 w-12 bg-muted rounded mb-2" />
+            <div className="h-5 w-16 bg-muted rounded mb-2" />
+            <div className="h-1 bg-muted rounded-full" />
           </div>
-          <Icon size={15} style={{ color: p.iconColor }} className="opacity-50 mt-0.5 shrink-0" />
-        </div>
-        <CardDescription className={`text-[11px] font-semibold uppercase tracking-wide mt-1 ${p.titleStyle}`}>
-          {p.title}
-        </CardDescription>
-        <CardTitle className="text-3xl font-bold tracking-tight" style={{ color: p.countColor }}>
-          {fmt(count)}
-        </CardTitle>
-      </CardHeader>
-
-      <CardContent className="pt-0 space-y-3">
-        {/* Short what + example always visible */}
-        <p className="text-xs text-muted-foreground leading-relaxed">{p.what}</p>
-
-        {/* Inline export */}
-        {p.exportStatus && (
-          <ExportBtn
-            status={p.exportStatus} label="Export CSV" count={count}
-            color={p.iconColor} bg={p.exportBg} BtnIcon={Download} small
-          />
-        )}
-        {p.key === 'autods_not_ebay' && (
-            <ExportBtn
-                status="_autods_only_direct"
-                directUrl={`${import.meta.env.VITE_API_URL || ''}/api/sync/export-autods-only`}
-                label="Export CSV" count={count}
-                color="#3b82f6" bg="bg-blue-50 border-blue-200" BtnIcon={Download} small
-            />
-            )}
-
-        {/* Expand toggle */}
-        <button
-          onClick={() => setOpen(o => !o)}
-          className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors w-full">
-          {open ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
-          {open ? 'Hide example' : 'Show example & fix'}
-        </button>
-      </CardContent>
-
-      {/* Expandable: example + fix */}
-      {open && (
-        <div className="border-t border-current/10 px-6 py-4 bg-white/60 space-y-3">
-          <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
-            <div className="text-[10px] font-bold uppercase tracking-widest text-amber-700 mb-1">Example</div>
-            <p className="text-xs text-amber-900 leading-relaxed">{p.example}</p>
-          </div>
-          <div>
-            <div className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-1">Fix</div>
-            <p className="text-xs font-medium text-foreground leading-relaxed">{p.fix}</p>
-          </div>
-        </div>
-      )}
-    </Card>
-  )
-}
-
-// ─── Coverage bar (reusable) ──────────────────────────────────────────────────
-function CoverageBar({ label, value, total, color }) {
-  const p = pct(value, total)
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between text-xs">
-        <span className="text-muted-foreground">{label}</span>
-        <span className="font-medium tabular-nums">{fmt(value)} <span className="text-muted-foreground/50">({p}%)</span></span>
+        ))}
       </div>
-      <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${p}%`, background: color }} />
+    </div>
+  )
+
+  const items = SUPPLIER_API_MAP
+    .map(s => ({ ...s, value: Number(suppliers?.[s.key] || 0) }))
+    .filter(s => s.value > 0)
+    .sort((a, b) => b.value - a.value)
+
+  const total = items.reduce((acc, s) => acc + s.value, 0)
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-muted-foreground font-medium">
+        Supplier Breakdown <span className="opacity-50">— all eBay listings by source ({fmt(total)} total)</span>
+      </p>
+      <div className="grid grid-cols-3 sm:grid-cols-4 xl:grid-cols-7 gap-2">
+        {items.map(s => {
+          const p = total > 0 ? Math.round((s.value / total) * 100) : 0
+          return (
+            <div key={s.label}
+              className="bg-card border border-border rounded-xl p-3 space-y-1.5 hover:shadow-sm transition-shadow">
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-xs text-muted-foreground font-medium truncate">{s.label}</span>
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0"
+                  style={{ background: s.fill + '20', color: s.fill }}>{p}%</span>
+              </div>
+              <p className="text-xl font-bold text-foreground tabular-nums">{fmt(s.value)}</p>
+              <div className="h-1 bg-muted rounded-full overflow-hidden">
+                <div className="h-full rounded-full transition-all duration-700"
+                  style={{ width: `${p}%`, background: s.fill }} />
+              </div>
+            </div>
+          )
+        })}
       </div>
     </div>
   )
 }
 
-// ─── Match rate radial — mirrors EbayTab ActiveRateRadial ─────────────────────
-function MatchRateRadial({ matched, total, loading }) {
-  const matchPct  = pct(matched, total)
-  const chartData = [{ value: matchPct, fill: '#22c55e' }]
-  const config    = { match: { label: 'Match Rate', color: '#22c55e' } }
+// ─── Stat row inside store card ───────────────────────────────────────────────
+function StatRow({ items }) {
+  const cells = [...items]
+  while (cells.length < 3) cells.push({ label: '', val: '' })
+  return (
+    <div className="flex border-border pt-4">
+      {cells.map((item, i) => {
+        const hasContent  = !!item.label
+        const prevContent = i > 0 && !!cells[i - 1].label
+        return (
+          <div key={i} className={`flex-1 min-w-0
+            ${hasContent && prevContent ? 'border-l border-border pl-4' : ''}
+            ${hasContent && i < 2 && cells[i + 1]?.label ? 'pr-4' : ''}`}>
+            {hasContent && <>
+              <p className="text-[9px] font-semibold uppercase tracking-widest text-muted-foreground mb-1.5 truncate">{item.label}</p>
+              <p className={`text-xl font-bold leading-none ${item.color || 'text-foreground'}`}>{item.val}</p>
+            </>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
-  if (loading) return <SkeletonChart height="h-[180px]" />
+function DividerLabel({ label }) {
+  return (
+    <div className="flex items-center gap-2 pt-4 pb-1">
+      <div className="h-px flex-1 bg-border" />
+      <span className="text-[9px] font-semibold uppercase tracking-widest text-muted-foreground/60">{label}</span>
+      <div className="h-px flex-1 bg-border" />
+    </div>
+  )
+}
 
+// ─── Store card ───────────────────────────────────────────────────────────────
+function StoreCard({ store, onSelect }) {
+  const total      = Number(store.total_items       || 0)
+  const active     = Number(store.active_listings   || 0)
+  const oos        = Number(store.out_of_stock      || 0)
+  const amazon     = Number(store.amazon_items      || 0)
+  const other      = Number(store.other_items       || 0)
+  const paired     = Number(store.paired            || 0)
+  const notUpd     = Number(store.not_updating      || 0)
+  const notUpdAzdp = Number(store.not_updating_azdp || 0)
+  const totalRisk  = notUpd + notUpdAzdp
+  const pairedPct  = pct(paired, amazon || total)
+
+  const activeSuppliers = SUPPLIERS_DEF
+    .filter(s => s.key !== 'amazon_items' && s.key !== 'other_items' && Number(store[s.key] || 0) > 0)
+    .map(s => ({ label: s.label, val: fmt(Number(store[s.key])) }))
+  const supChunks = chunkArray(activeSuppliers, 3)
+  const hasSync   = paired > 0 || totalRisk > 0
+
+  return (
+    <button
+      onClick={() => onSelect(store.store_name)}
+      className="text-left bg-card border border-black/70 rounded-2xl p-7 w-full shadow-sm transition-all duration-300 ease-out hover:shadow-[0_12px_30px_rgba(0,0,0,0.18)] hover:-translate-y-1 hover:cursor-pointer"
+    >
+      <h3 className="text-2xl font-black text-foreground mb-1 capitalize leading-tight">{store.store_name}</h3>
+      {store.last_updated && (
+        <p className="text-[10px] text-muted-foreground mb-3">Updated {timeAgo(store.last_updated)}</p>
+      )}
+      <StatRow items={[
+        { label: 'All Items',    val: fmt(total)  },
+        { label: 'Active',       val: fmt(active) },
+        { label: 'Out of Stock', val: fmt(oos)    },
+      ]} />
+      {(amazon > 0 || other > 0) && (
+        <StatRow items={[
+          { label: 'Amazon', val: fmt(amazon) },
+          { label: 'Other',  val: fmt(other)  },
+          { label: '',       val: ''          },
+        ]} />
+      )}
+      {supChunks.map((chunk, i) => <StatRow key={i} items={chunk} />)}
+      {hasSync && (
+        <>
+          <DividerLabel label="AutoDS Sync" />
+          <StatRow items={[
+            { label: 'Paired ✓',     val: fmt(paired),     color: pairColor(pairedPct) },
+            { label: 'Not Updating', val: fmt(totalRisk),  color: totalRisk > 0 ? 'text-red-500' : 'text-foreground' },
+            { label: 'Pair Rate',    val: `${pairedPct}%`, color: pairColor(pairedPct) },
+          ]} />
+        </>
+      )}
+    </button>
+  )
+}
+
+// ─── Charts ───────────────────────────────────────────────────────────────────
+function TopStoresChart({ stores, loading }) {
+  const data = useMemo(() => [...stores]
+    .sort((a, b) => Number(b.total_items) - Number(a.total_items))
+    .slice(0, 10)
+    .map(s => ({
+      name:   s.store_name.replace(/au$/i, '').slice(0, 9),
+      active: Number(s.active_listings),
+      oos:    Number(s.out_of_stock),
+    })), [stores])
+  const config = { active: { label: 'Active', color: RED }, oos: { label: 'Out of Stock', color: PINK } }
+  if (loading) return <SkeletonChart height="h-[240px]" />
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Top 10 Stores by Listings</CardTitle>
+        <CardDescription className="text-xs flex items-center gap-4 mt-1">
+          <span className="flex items-center gap-1.5"><span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: RED }} /> Active</span>
+          <span className="flex items-center gap-1.5"><span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: PINK }} /> Out of Stock</span>
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ChartContainer config={config} className="h-[220px] w-full">
+          <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
+            <XAxis dataKey="name" tick={{ fontSize: 8 }} tickLine={false} axisLine={false} />
+            <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v} />
+            <ChartTooltip content={<ChartTooltipContent />} />
+            <Bar dataKey="active" stackId="a" fill={RED}  radius={[0,0,0,0]} />
+            <Bar dataKey="oos"    stackId="a" fill={PINK} radius={[3,3,0,0]} />
+          </BarChart>
+        </ChartContainer>
+      </CardContent>
+    </Card>
+  )
+}
+
+function OutOfStockChart({ stores, loading }) {
+  const SHADES = ['#7f1d1d','#991b1b','#b91c1c','#dc2626','#ef4444','#f87171','#fca5a5','#fecaca','#fee2e2','#fff1f2']
+  const data = useMemo(() => [...stores]
+    .sort((a, b) => Number(b.out_of_stock) - Number(a.out_of_stock))
+    .slice(0, 10)
+    .map((s, i) => ({
+      name: s.store_name.replace(/au$/i, '').slice(0, 10),
+      oos:  Number(s.out_of_stock),
+      fill: SHADES[i],
+    })), [stores])
+  const config = { oos: { label: 'Out of Stock', color: RED } }
+  if (loading) return <SkeletonChart height="h-[240px]" />
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Out of Stock by Store</CardTitle>
+        <CardDescription className="text-xs">Top 10 stores needing restocking</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ChartContainer config={config} className="h-[220px] w-full">
+          <BarChart data={data} layout="vertical" margin={{ top: 0, right: 10, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f3f4f6" />
+            <XAxis type="number" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v} />
+            <YAxis type="category" dataKey="name" tick={{ fontSize: 8 }} tickLine={false} axisLine={false} width={60} />
+            <ChartTooltip content={<ChartTooltipContent hideLabel />} />
+            <Bar dataKey="oos" radius={[0,4,4,0]}>
+              {data.map((entry, i) => <Cell key={i} fill={entry.fill} />)}
+            </Bar>
+          </BarChart>
+        </ChartContainer>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ─── Sidebar charts ───────────────────────────────────────────────────────────
+function ActiveRateRadial({ summary, loading }) {
+  const total  = Number(summary?.total_listings || 0)
+  const active = Number(summary?.total_active   || 0)
+  const p      = pct(active, total)
+  const chartData = [{ value: p, fill: RED }]
+  const config    = { active: { label: 'Active Rate', color: RED } }
+  if (loading) return <SkeletonChart height="h-[200px]" />
   return (
     <Card className="flex flex-col">
       <CardHeader className="items-center pb-0">
-        <CardTitle className="text-sm">Match Rate</CardTitle>
-        <CardDescription className="text-xs">eBay listings with AutoDS</CardDescription>
+        <CardTitle className="text-sm">Active Listing Rate</CardTitle>
+        <CardDescription className="text-xs">All eBay listings (all suppliers)</CardDescription>
       </CardHeader>
       <CardContent className="flex-1 pb-0">
         <ChartContainer config={config} className="mx-auto aspect-square max-h-[180px]">
-          <RadialBarChart data={chartData} endAngle={(matchPct / 100) * 360} innerRadius={58} outerRadius={85}>
-            <PolarGrid gridType="circle" radialLines={false} stroke="none"
-              className="first:fill-muted last:fill-background" polarRadius={[76, 64]} />
-            <RadialBar dataKey="value" background={{ fill: '#dcfce7' }} fill="#22c55e" />
+          <RadialBarChart data={chartData} endAngle={(p / 100) * 360} innerRadius={58} outerRadius={85}>
+            <PolarGrid gridType="circle" radialLines={false} stroke="none" className="first:fill-muted last:fill-background" polarRadius={[76, 64]} />
+            <RadialBar dataKey="value" background={{ fill: '#fee2e2' }} fill={RED} />
             <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
               <Label content={({ viewBox }) => {
                 if (!viewBox || !('cx' in viewBox)) return null
                 return (
                   <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
-                    <tspan x={viewBox.cx} y={viewBox.cy} fontSize={28} fontWeight={700} fill="#111">{matchPct}%</tspan>
-                    <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 20} fontSize={10} fill="#9ca3af">Matched</tspan>
+                    <tspan x={viewBox.cx} y={viewBox.cy} fontSize={28} fontWeight={700} fill="#111">{p}%</tspan>
+                    <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 20} fontSize={10} fill="#9ca3af">In stock</tspan>
                   </text>
                 )
               }} />
@@ -367,82 +395,157 @@ function MatchRateRadial({ matched, total, loading }) {
       </CardContent>
       <CardFooter className="flex-col gap-1 text-sm pt-2">
         <div className="flex items-center gap-2 font-medium leading-none text-xs">
-          {fmt(matched)} of {fmt(total)} listings
-          <TrendingUp className="h-3 w-3 text-green-500" />
+          {fmt(active)} of {fmt(total)} active
+          <TrendingUp className="h-3 w-3" style={{ color: RED }} />
         </div>
-        <div className="leading-none text-muted-foreground text-xs">healthy eBay coverage</div>
+        <div className="leading-none text-muted-foreground text-xs">Total eBay inventory</div>
       </CardFooter>
     </Card>
   )
 }
 
-// ─── At-risk donut — mirrors EbayTab SupplierDonutChart ──────────────────────
-function RiskDonut({ health, loading }) {
-  const [activeIndex, setActiveIndex] = useState(0)
-
-  const pieData = useMemo(() => [
-    { name: 'Matched',            value: Number(health?.matched_rows      || 0), fill: '#22c55e' },
-    { name: 'Active — no AutoDS', value: Number(health?.active_no_autods  || 0), fill: '#ef4444' },
-    { name: 'Active — no SKU',    value: Number(health?.active_no_skumap  || 0), fill: '#f97316' },
-    { name: 'Dead — no AutoDS',   value: Number(health?.dead_no_autods    || 0), fill: '#9ca3af' },
-    { name: 'Dead — no SKU',      value: Number(health?.dead_no_skumap    || 0), fill: '#d1d5db' },
-  ].filter(d => d.value > 0), [health])
-
-  const config = useMemo(() => Object.fromEntries(
-    pieData.map(d => [d.name, { label: d.name, color: d.fill }])
-  ), [pieData])
-
-  const total  = pieData.reduce((s, d) => s + d.value, 0)
-  const active = pieData[activeIndex] || pieData[0]
-
-  if (loading) return <SkeletonChart height="h-[320px]" />
-
+function PairRateRadial({ summary, loading }) {
+  const paired = Number(summary?.paired            || 0)
+  const total  = Number(summary?.ebay_total_amazon || 0)
+  const p      = pct(paired, total)
+  const color  = p > 80 ? GREEN : p > 50 ? AMBER : RED
+  const bgFill = p > 80 ? '#dcfce7' : p > 50 ? '#fef3c7' : '#fee2e2'
+  const chartData = [{ value: p, fill: color }]
+  const config    = { pair: { label: 'Pair Rate', color } }
+  if (loading) return <SkeletonChart height="h-[200px]" />
   return (
     <Card className="flex flex-col">
       <CardHeader className="items-center pb-0">
-        <CardTitle className="text-sm">eBay Listing Status</CardTitle>
-        <CardDescription className="text-xs">All Amazon eBay listings breakdown</CardDescription>
+        <CardTitle className="text-sm">AutoDS Pair Rate</CardTitle>
+        <CardDescription className="text-xs">Amazon eBay listings with AutoDS</CardDescription>
+      </CardHeader>
+      <CardContent className="flex-1 pb-0">
+        <ChartContainer config={config} className="mx-auto aspect-square max-h-[180px]">
+          <RadialBarChart data={chartData} endAngle={(p / 100) * 360} innerRadius={58} outerRadius={85}>
+            <PolarGrid gridType="circle" radialLines={false} stroke="none" className="first:fill-muted last:fill-background" polarRadius={[76, 64]} />
+            <RadialBar dataKey="value" background={{ fill: bgFill }} fill={color} />
+            <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
+              <Label content={({ viewBox }) => {
+                if (!viewBox || !('cx' in viewBox)) return null
+                return (
+                  <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
+                    <tspan x={viewBox.cx} y={viewBox.cy} fontSize={28} fontWeight={700} fill="#111">{p}%</tspan>
+                    <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 20} fontSize={10} fill="#9ca3af">Paired</tspan>
+                  </text>
+                )
+              }} />
+            </PolarRadiusAxis>
+          </RadialBarChart>
+        </ChartContainer>
+      </CardContent>
+      <CardFooter className="flex-col gap-1 text-sm pt-2">
+        <div className="flex items-center gap-2 font-medium leading-none text-xs">
+          {fmt(paired)} of {fmt(total)} paired
+          <TrendingUp className="h-3 w-3" style={{ color }} />
+        </div>
+        <div className="leading-none text-muted-foreground text-xs">AutoDS coverage</div>
+      </CardFooter>
+    </Card>
+  )
+}
+
+function SyncStatusCard({ summary, loading }) {
+  if (loading) return <SkeletonChart height="h-[160px]" />
+  const total       = Number(summary?.ebay_total_amazon || 0)
+  const paired      = Number(summary?.paired            || 0)
+  const notUpd      = Number(summary?.not_updating      || 0)
+  const notUpdAzdp  = Number(summary?.not_updating_azdp || 0)
+  const notOnEbay   = Number(summary?.not_on_ebay       || 0)
+  const autodsTotal = Number(summary?.autods_total      || 0)
+  const computedAt  = summary?.computed_at
+
+  const bars = [
+    { label: 'Paired ✓',        value: paired,     color: GREEN, total },
+    { label: 'Not Updating',    value: notUpd,     color: RED,   total },
+    { label: 'Not Upd. (AZDP)', value: notUpdAzdp, color: PINK,  total },
+    { label: 'Not on eBay',     value: notOnEbay,  color: AMBER, total: autodsTotal },
+  ]
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">eBay Sync Status</CardTitle>
+        <CardDescription className="text-xs">
+          Amazon listings pairing
+          {computedAt && <span className="ml-1 opacity-60">· cache {timeAgo(computedAt)}</span>}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {bars.map(b => {
+          const p = pct(b.value, b.total)
+          return (
+            <div key={b.label} className="space-y-1">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">{b.label}</span>
+                <span className="font-medium tabular-nums">{fmt(b.value)} <span className="text-muted-foreground/50">({p}%)</span></span>
+              </div>
+              <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                <div className="h-full rounded-full transition-all duration-700" style={{ width: `${p}%`, background: b.color }} />
+              </div>
+            </div>
+          )
+        })}
+        <p className="text-[10px] text-muted-foreground pt-1">{fmt(paired)} of {fmt(total)} Amazon eBay listings synced</p>
+      </CardContent>
+    </Card>
+  )
+}
+
+function SupplierDonutChart({ stores, loading }) {
+  const [activeIndex, setActiveIndex] = useState(0)
+  const pieData = useMemo(() => SUPPLIERS_DEF.map(s => ({
+    key: s.key, supplier: s.label,
+    items: stores.reduce((acc, store) => acc + Number(store[s.key] || 0), 0),
+    fill: s.fill,
+  })).filter(s => s.items > 0).sort((a, b) => b.items - a.items), [stores])
+  const config = useMemo(() => Object.fromEntries(pieData.map(s => [s.supplier, { label: s.supplier, color: s.fill }])), [pieData])
+  const total  = pieData.reduce((acc, s) => acc + s.items, 0)
+  const active = pieData[activeIndex] || pieData[0]
+  if (loading) return <SkeletonChart height="h-[320px]" />
+  return (
+    <Card className="flex flex-col">
+      <CardHeader className="items-center pb-0">
+        <CardTitle className="text-sm">Items by Supplier</CardTitle>
+        <CardDescription className="text-xs">All suppliers across all stores</CardDescription>
       </CardHeader>
       <CardContent className="flex-1 pb-0">
         <ChartContainer config={config} className="mx-auto aspect-square max-h-[200px]">
           <PieChart>
-            <ChartTooltip content={<ChartTooltipContent nameKey="name" hideLabel />} />
-            <Pie data={pieData} dataKey="value" nameKey="name"
-              innerRadius={58} outerRadius={85} strokeWidth={3}
-              activeIndex={activeIndex}
-              onMouseEnter={(_, i) => setActiveIndex(i)}
+            <ChartTooltip content={<ChartTooltipContent nameKey="supplier" hideLabel />} />
+            <Pie data={pieData} dataKey="items" nameKey="supplier" innerRadius={58} outerRadius={85} strokeWidth={3}
+              activeIndex={activeIndex} onMouseEnter={(_, index) => setActiveIndex(index)}
               activeShape={({ outerRadius = 0, ...props }) => <Sector {...props} outerRadius={outerRadius + 10} />}>
               <Label content={({ viewBox }) => {
                 if (!viewBox || !('cx' in viewBox)) return null
                 return (
                   <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
                     <tspan x={viewBox.cx} y={(viewBox.cy || 0) - 8} fontSize={22} fontWeight={700} fill="#111">
-                      {active ? Math.round((active.value / total) * 100) : 0}%
+                      {active ? Math.round((active.items / total) * 100) : 0}%
                     </tspan>
-                    <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 12} fontSize={9} fill="#9ca3af">
-                      {active?.name?.split(' — ')[0]}
-                    </tspan>
+                    <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 12} fontSize={10} fill="#9ca3af">{active?.supplier}</tspan>
                   </text>
                 )
               }} />
-              {pieData.map((d, i) => <Cell key={i} fill={d.fill} />)}
             </Pie>
           </PieChart>
         </ChartContainer>
         <div className="mt-2 space-y-0.5 px-1">
-          {pieData.map((d, i) => (
-            <div key={d.name}
+          {pieData.map((s, i) => (
+            <div key={s.key}
               className={`flex items-center justify-between text-xs cursor-pointer rounded px-1.5 py-1 transition-colors ${i === activeIndex ? 'bg-muted' : 'hover:bg-muted/50'}`}
               onMouseEnter={() => setActiveIndex(i)}>
               <div className="flex items-center gap-2">
-                <div className="w-2 h-2 rounded-full shrink-0" style={{ background: d.fill }} />
-                <span className="text-muted-foreground">{d.name}</span>
+                <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: s.fill }} />
+                <span className="text-muted-foreground">{s.supplier}</span>
               </div>
               <div className="flex items-center gap-2">
-                <span className="font-medium">{fmt(d.value)}</span>
-                <span className="text-muted-foreground/60 text-[10px] w-7 text-right">
-                  {total > 0 ? Math.round((d.value / total) * 100) : 0}%
-                </span>
+                <span className="font-medium">{fmt(s.items)}</span>
+                <span className="text-muted-foreground/60 text-[10px] w-7 text-right">{total > 0 ? Math.round((s.items / total) * 100) : 0}%</span>
               </div>
             </div>
           ))}
@@ -450,431 +553,358 @@ function RiskDonut({ health, loading }) {
       </CardContent>
       <CardFooter className="flex-col gap-1 text-sm pt-3">
         <div className="flex items-center gap-2 font-medium leading-none text-xs">
-          {active?.name} · {fmt(active?.value)}
-          <TrendingUp className="h-3 w-3" style={{ color: active?.fill }} />
+          {active?.supplier} leads with {fmt(active?.items)} items
+          <TrendingUp className="h-3 w-3" style={{ color: RED }} />
         </div>
-        <div className="leading-none text-muted-foreground text-xs">{fmt(total)} total eBay listings</div>
+        <div className="leading-none text-muted-foreground text-xs">{fmt(total)} total items tracked</div>
       </CardFooter>
     </Card>
   )
 }
 
-// ─── Stacked bar: unmonitored by store — mirrors TopStoresChart ───────────────
-function UnmonitoredStoresChart({ health, loading }) {
-  const data = useMemo(() =>
-    (health?.stores || []).slice(0, 10).map(s => ({
-      name:   s.store_name.replace(/au$/i,'').slice(0, 9),
-      active: Number(s.active_risk),
-      dead:   Number(s.dead_safe),
-    })), [health])
+// ─── Export section ───────────────────────────────────────────────────────────
+const EXPORT_GROUPS = [
+  {
+    title: 'eBay Listings',
+    headerText: 'text-blue-700',
+    exports: [
+      { id: 'ebay-active',         label: 'eBay All Active',       icon: Package,      iconColor: 'text-blue-500',   url: `${BASE_URL}/api/export/ebay-active`,                      filename: 'ebay_all_active.csv' },
+      { id: 'ebay-oos',            label: 'eBay All OOS',          icon: PackageX,     iconColor: 'text-red-500',    url: `${BASE_URL}/api/export/ebay-oos`,                         filename: 'ebay_all_oos.csv' },
+      { id: 'ebay-active-no-autods', label: 'Active — No AutoDS',  icon: ZapOff,       iconColor: 'text-orange-500', url: `${BASE_URL}/api/sync/export-csv?status=active_no_autods`, filename: 'active_no_autods.csv' },
+      { id: 'ebay-dead-no-autods', label: 'OOS — No AutoDS',       icon: ListX,        iconColor: 'text-rose-500',   url: `${BASE_URL}/api/sync/export-csv?status=dead_no_autods`,   filename: 'oos_no_autods.csv' },
+      { id: 'ebay-no-autods',      label: 'eBay Not in AutoDS',    icon: AlertCircle,  iconColor: 'text-amber-500',  url: `${BASE_URL}/api/export/ebay-no-autods`,                   filename: 'ebay_not_in_autods.csv' },
+    ],
+  },
+  {
+    title: 'AutoDS',
+    headerText: 'text-green-700',
+    exports: [
+      { id: 'autods-matched',    label: 'AutoDS Matched',       icon: CheckCircle2, iconColor: 'text-green-600',  url: `${BASE_URL}/api/export/autods-matched`,    filename: 'autods_active_matched.csv' },
+      { id: 'autods-all',        label: 'AutoDS All',           icon: Package,      iconColor: 'text-teal-500',   url: `${BASE_URL}/api/export/autods-all`,         filename: 'autods_all.csv' },
+      { id: 'autods-not-ebay',   label: 'AutoDS Not on eBay',   icon: Clock,        iconColor: 'text-purple-500', url: `${BASE_URL}/api/export/autods-not-ebay`,    filename: 'autods_not_on_ebay.csv' },
+      { id: 'not-updating-azdp', label: 'Not Updating (AZDP)',  icon: Zap,          iconColor: 'text-yellow-500', url: `${BASE_URL}/api/export/not-updating-azdp`,  filename: 'not_updating_azdp.csv' },
+      { id: 'autods-oos',        label: 'AutoDS OOS',           icon: PackageX,     iconColor: 'text-red-500',    url: `${BASE_URL}/api/export/autods-oos`,         filename: 'autods_oos.csv' },
+    ],
+  },
+  {
+    title: 'Supplier Inventory',
+    headerText: 'text-purple-700',
+    exports: [
+      { id: 'all-paired',          label: 'All Paired Listings',   icon: PackageCheck, iconColor: 'text-green-600',  url: `${BASE_URL}/api/sync/export-csv?status=matched`,  filename: 'all_paired.csv' },
+      { id: 'nonamazon-unlisted',  label: 'Non-Amazon Never Listed', icon: TrendingUp, iconColor: 'text-purple-500', url: `${BASE_URL}/api/export/nonamazon-unlisted`,        filename: 'nonamazon_never_listed.csv', slow: true, hintText: '~81k rows' },
+    ],
+  },
+]
 
-  const config = {
-    active: { label: 'Active risk', color: '#ef4444' },
-    dead:   { label: 'Dead safe',   color: '#fca5a5' },
-  }
-
-  if (loading) return <SkeletonChart height="h-[220px]" />
-
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm">Top Stores by Unmonitored</CardTitle>
-        <CardDescription className="text-xs flex items-center gap-4 mt-1">
-          <span className="flex items-center gap-1.5">
-            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-red-500" /> Active risk
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="inline-block w-2.5 h-2.5 rounded-sm bg-red-200" /> Dead safe
-          </span>
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <ChartContainer config={config} className="h-[220px] w-full">
-          <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
-            <XAxis dataKey="name" tick={{ fontSize: 8 }} tickLine={false} axisLine={false} />
-            <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false}
-              tickFormatter={v => v >= 1000 ? `${Math.round(v/1000)}k` : v} />
-            <ChartTooltip content={<ChartTooltipContent />} />
-            <Bar dataKey="active" stackId="a" fill="#ef4444" />
-            <Bar dataKey="dead"   stackId="a" fill="#fca5a5" radius={[3,3,0,0]} />
-          </BarChart>
-        </ChartContainer>
-      </CardContent>
-    </Card>
-  )
-}
-
-// ─── AutoDS coverage horizontal bar — mirrors OutOfStockChart ─────────────────
-function AutodsCoverageChart({ health, loading }) {
-  const SHADES = ['#1e3a5f','#1e40af','#1d4ed8','#2563eb','#3b82f6','#60a5fa','#93c5fd','#bfdbfe','#dbeafe','#eff6ff']
-
-  const data = useMemo(() =>
-    (health?.stores || []).slice(0, 10).map((s, i) => ({
-      name:  s.store_name.replace(/au$/i,'').slice(0, 10),
-      risk:  Number(s.active_risk),
-      fill:  SHADES[i] || '#3b82f6',
-    })), [health])
-
-  const config = { risk: { label: 'Active risk', color: '#3b82f6' } }
-
-  if (loading) return <SkeletonChart height="h-[220px]" />
-
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm">Active Risk by Store</CardTitle>
-        <CardDescription className="text-xs">Top 10 stores — live listings with no AutoDS</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <ChartContainer config={config} className="h-[220px] w-full">
-          <BarChart data={data} layout="vertical" margin={{ top: 0, right: 10, left: 0, bottom: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f3f4f6" />
-            <XAxis type="number" tick={{ fontSize: 9 }} tickLine={false} axisLine={false}
-              tickFormatter={v => v >= 1000 ? `${Math.round(v/1000)}k` : v} />
-            <YAxis type="category" dataKey="name" tick={{ fontSize: 8 }} tickLine={false} axisLine={false} width={65} />
-            <ChartTooltip content={<ChartTooltipContent hideLabel />} />
-            <Bar dataKey="risk" radius={[0,4,4,0]}>
-              {data.map((d, i) => <Cell key={i} fill={d.fill} />)}
-            </Bar>
-          </BarChart>
-        </ChartContainer>
-      </CardContent>
-    </Card>
-  )
-}
-
-// ─── Browse table ─────────────────────────────────────────────────────────────
-function BrowseTable({ endpoint, storeOptions }) {
-  const [rows, setRows]           = useState([])
-  const [total, setTotal]         = useState(0)
-  const [page, setPage]           = useState(0)
-  const [busy, setBusy]           = useState(true)
-  const [search, setSearch]       = useState('')
-  const [store, setStore]         = useState('')
-  const [stock, setStock]         = useState('')
-  const [debSearch, setDebSearch] = useState('')
-  const LIMIT = 50
-
-  useEffect(() => { const t = setTimeout(() => setDebSearch(search), 300); return () => clearTimeout(t) }, [search])
-  useEffect(() => { setPage(0) }, [debSearch, store, stock, endpoint])
+function ExportSection({ summary, loading }) {
+  const [downloading, setDownloading] = useState({})
+  const [errors,      setErrors]      = useState({})
+  const [counts,      setCounts]      = useState({})
 
   useEffect(() => {
-    let cancelled = false
-    async function load() {
-      setBusy(true)
-      const p = new URLSearchParams({ page, limit: LIMIT })
-      if (debSearch) p.set('search', debSearch)
-      if (store)     p.set('store_name', store)
-      if (stock)     p.set('stock', stock)
-      const data = await api.get(`${endpoint}?${p}`)
-      if (!cancelled) { setRows(data?.data || []); setTotal(data?.count || 0); setBusy(false) }
-    }
-    load(); return () => { cancelled = true }
-  }, [endpoint, page, debSearch, store, stock])
+    fetch(`${BASE_URL}/api/export/counts`)
+      .then(r => r.json())
+      .then(d => { if (!d.error) setCounts(d) })
+      .catch(() => {})
+  }, [])
 
-  const totalPages    = Math.ceil(total / LIMIT)
-  const isUnmonitored = endpoint.includes('unmonitored')
-  const isAutodsOnly  = endpoint.includes('autods-only')
-  const colCount      = isAutodsOnly ? 3 : isUnmonitored ? 6 : 5
+  async function handleDownload(exp) {
+    setDownloading(d => ({ ...d, [exp.id]: true }))
+    setErrors(e => ({ ...e, [exp.id]: null }))
+    try {
+      const resp = await fetch(exp.url)
+      if (!resp.ok) throw new Error(`${resp.status}`)
+      const blob = await resp.blob()
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href = url; a.download = exp.filename
+      document.body.appendChild(a); a.click()
+      document.body.removeChild(a); URL.revokeObjectURL(url)
+    } catch (err) {
+      setErrors(e => ({ ...e, [exp.id]: err.message }))
+    } finally {
+      setDownloading(d => ({ ...d, [exp.id]: false }))
+    }
+  }
+
+  if (loading) return (
+    <Card className="animate-pulse">
+      <CardContent className="py-3 px-4">
+        <div className="h-24 bg-muted/40 rounded-lg" />
+      </CardContent>
+    </Card>
+  )
 
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="relative flex-1 min-w-[180px] max-w-xs">
-          <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-          <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search SKU, item ID…"
-            className="w-full pl-8 pr-7 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground/60 transition-all" />
-          {search && <button onClick={() => setSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"><X size={12} /></button>}
-        </div>
-        {!isAutodsOnly && storeOptions?.length > 0 && (
-          <select value={store} onChange={e => setStore(e.target.value)}
-            className="px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground">
-            <option value="">All stores</option>
-            {storeOptions.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-        )}
-        {!isAutodsOnly && (
-          <select value={stock} onChange={e => setStock(e.target.value)}
-            className="px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground">
-            <option value="">All stock</option>
-            <option value="in">In stock</option>
-            <option value="out">Out of stock</option>
-          </select>
-        )}
-        <span className="ml-auto text-xs text-muted-foreground">{fmt(total)} rows</span>
-      </div>
+    <Card>
+      <CardContent className="p-0">
+        <div className="grid grid-cols-3 divide-x divide-border">
+          {EXPORT_GROUPS.map(group => (
+            <div key={group.title} className="px-3 py-2">
+              <p className={`text-[9px] font-bold uppercase tracking-widest mb-1 ${group.headerText}`}>
+                {group.title}
+              </p>
+              <div className="grid grid-cols-2 gap-x-1 gap-y-0">
+                {group.exports.map(exp => {
+                  const Icon      = exp.icon
+                  const isLoading = downloading[exp.id]
+                  const hasError  = errors[exp.id]
+                  const countVal  = counts[exp.id] !== undefined
+                    ? Number(counts[exp.id])
+                    : exp.summaryKey ? Number(summary?.[exp.summaryKey] || 0) : null
+                  const count = exp.hintText || (countVal !== null && countVal > 0 ? fmt(countVal) : null)
 
-      <div className="rounded-xl border border-border overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-border bg-muted/40">
-                {!isAutodsOnly && <th className="text-left px-4 py-2.5 font-semibold text-muted-foreground">Store</th>}
-                <th className="text-left px-4 py-2.5 font-semibold text-muted-foreground">SKU</th>
-                {isUnmonitored && <th className="text-left px-4 py-2.5 font-semibold text-muted-foreground">ASIN</th>}
-                {!isAutodsOnly && <th className="text-left px-4 py-2.5 font-semibold text-muted-foreground">Item ID</th>}
-                <th className="text-right px-4 py-2.5 font-semibold text-muted-foreground">Price</th>
-                <th className="text-right px-4 py-2.5 font-semibold text-muted-foreground">{isAutodsOnly ? 'Stock' : 'Qty'}</th>
-                {!isAutodsOnly && <th className="text-right px-4 py-2.5 font-semibold text-muted-foreground">Status</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {busy ? Array.from({ length: 8 }).map((_, i) => (
-                <tr key={i} className="border-b border-border last:border-0 animate-pulse">
-                  {Array.from({ length: colCount }).map((_, j) => (
-                    <td key={j} className="px-4 py-2.5"><div className="h-3 bg-muted rounded" /></td>
-                  ))}
-                </tr>
-              )) : rows.length === 0 ? (
-                <tr><td colSpan={99} className="px-4 py-10 text-center text-sm text-muted-foreground">No items found</td></tr>
-              ) : rows.map(row => {
-                const qty   = Number(row.quantity ?? row.stock ?? 0)
-                const isOut = qty === 0
-                return (
-                  <tr key={row.id} className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors">
-                    {!isAutodsOnly && <td className="px-4 py-2 font-medium capitalize text-foreground">{row.store_name}</td>}
-                    <td className="px-4 py-2 font-mono text-muted-foreground">{row.sku}</td>
-                    {isUnmonitored && <td className="px-4 py-2 font-mono text-amber-600">{row.origin_sku}</td>}
-                    {!isAutodsOnly && <td className="px-4 py-2 font-mono text-[11px] text-muted-foreground">{row.item_id || '—'}</td>}
-                    <td className="px-4 py-2 text-right font-medium">{row.price ? `$${Number(row.price).toFixed(2)}` : '—'}</td>
-                    <td className={`px-4 py-2 text-right font-semibold ${isOut ? 'text-red-500' : ''}`}>{fmt(qty)}</td>
-                    {!isAutodsOnly && (
-                      <td className="px-4 py-2 text-right">
-                        <span className={`inline-flex text-[10px] font-medium border rounded-full px-2 py-0.5 ${isOut ? 'text-red-600 bg-red-50 border-red-100' : 'text-emerald-600 bg-emerald-50 border-emerald-100'}`}>
-                          {isOut ? 'Out' : 'In stock'}
-                        </span>
-                      </td>
-                    )}
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+                  return (
+                    <button key={exp.id} onClick={() => handleDownload(exp)} disabled={isLoading}
+                      title={exp.desc + (exp.slow ? ' (~20s)' : '')}
+                      className={`flex items-center justify-between gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium transition-all w-full group
+                        ${hasError ? 'bg-red-50 text-red-600' : isLoading ? 'opacity-50 cursor-not-allowed text-muted-foreground' : 'hover:bg-muted text-foreground'}`}>
+                      <div className="flex items-center gap-1 min-w-0">
+                        {isLoading ? (
+                          <svg className="animate-spin h-2.5 w-2.5 flex-shrink-0" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                          </svg>
+                        ) : (
+                          <Icon size={10} className={`flex-shrink-0 ${exp.iconColor}`} />
+                        )}
+                        <span className="truncate text-[11px]">{exp.label}</span>
+                      </div>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        {count && !isLoading && (
+                          <span className="text-muted-foreground tabular-nums text-[10px] font-normal">{count}</span>
+                        )}
+                        {hasError
+                          ? <span className="text-red-500 text-[10px]">✕</span>
+                          : <Download size={9} className="text-muted-foreground/40 group-hover:text-muted-foreground transition-colors" />}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
         </div>
-      </div>
+      </CardContent>
+    </Card>
+  )
+}
 
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between text-xs text-muted-foreground">
-          <span>Page {page + 1} / {totalPages}</span>
-          <div className="flex items-center gap-1">
-            <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
-              className="p-1.5 rounded-md border border-border hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed">
-              <ChevronLeft size={12} />
-            </button>
-            <button onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1}
-              className="p-1.5 rounded-md border border-border hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed">
-              <ChevronRight size={12} />
-            </button>
-          </div>
-        </div>
-      )}
+// ─── Filter bar ───────────────────────────────────────────────────────────────
+function FilterBar({ search, onSearch, supplierFilter, onSupplierFilter, stockFilter, onStockFilter, resultCount, totalCount }) {
+  const hasFilters = search || supplierFilter || stockFilter
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <div className="relative flex-1 min-w-[200px] max-w-xs">
+        <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+        <input type="text" value={search} onChange={e => onSearch(e.target.value)} placeholder="Search stores…"
+          className="w-full pl-8 pr-8 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground/60 transition-all" />
+        {search && <button onClick={() => onSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"><X size={12} /></button>}
+      </div>
+      <div className="relative">
+        <SlidersHorizontal size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+        <select value={supplierFilter} onChange={e => onSupplierFilter(e.target.value)}
+          className="pl-8 pr-7 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground transition-all">
+          <option value="">All Suppliers</option>
+          {SUPPLIERS_DEF.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+        </select>
+      </div>
+      <select value={stockFilter} onChange={e => onStockFilter(e.target.value)}
+        className="px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground transition-all">
+        <option value="">All Stock</option>
+        <option value="in">Has Active Listings</option>
+        <option value="out">Has Out-of-Stock</option>
+      </select>
+      <div className="flex items-center gap-2 ml-auto">
+        {hasFilters && (
+          <button onClick={() => { onSearch(''); onSupplierFilter(''); onStockFilter('') }}
+            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors">
+            <X size={11} /> Clear
+          </button>
+        )}
+        {hasFilters && <span className="text-xs text-muted-foreground">{resultCount} of {totalCount}</span>}
+      </div>
     </div>
   )
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
-export default function SyncTab() {
-  const [stats,         setStats]         = useState(STATS_CACHE.data  || null)
-  const [health,        setHealth]        = useState(HEALTH_CACHE.data || null)
-  const [loading,       setLoading]       = useState(!STATS_CACHE.data)
-  const [loadingHealth, setLoadingHealth] = useState(!HEALTH_CACHE.data)
-  const [browseTab,     setBrowseTab]     = useState('unmonitored')
+export default function StoresTab() {
+  const [stores,         setStores]         = useState(STORES_CACHE.data   || [])
+  const [summary,        setSummary]        = useState(SUMMARY_CACHE.data  || null)
+  const [suppliers,      setSuppliers]      = useState(SUPPLIER_CACHE.data || null)
+  const [loading,        setLoading]        = useState(!STORES_CACHE.data)
+  const [lastSynced, setLastSynced] = useState({ ebay: null, autods: null })
+  const [selectedStore,  setSelectedStore]  = useState(null)
+  const [search,         setSearch]         = useState('')
+  const [supplierFilter, setSupplierFilter] = useState('')
+  const [stockFilter,    setStockFilter]    = useState('')
 
   useEffect(() => {
-    async function loadStats() {
-      if (STATS_CACHE.data && Date.now() - STATS_CACHE.ts < STALE_MS) return
-      if (!STATS_CACHE.data) setLoading(true)
-      const data = await api.get('/api/sync/stats')
-      if (data) { setStats(data); STATS_CACHE.data = data; STATS_CACHE.ts = Date.now() }
-      setLoading(false)
-    }
-    async function loadHealth() {
-      if (HEALTH_CACHE.data && Date.now() - HEALTH_CACHE.ts < STALE_MS) return
-      if (!HEALTH_CACHE.data) setLoadingHealth(true)
-      const data = await api.get('/api/sync/health-summary')
-      if (data) { setHealth(data); HEALTH_CACHE.data = data; HEALTH_CACHE.ts = Date.now() }
-      setLoadingHealth(false)
-    }
-    loadStats(); loadHealth()
-  }, [])
+  async function load() {
+    // ── Always fetch last-synced (outside cache guard) ──
+    const syncedData = await api.get('/api/sync/last-synced')
+    if (syncedData) setLastSynced(syncedData)
 
-  const storeOptions = useMemo(() => (stats?.stores || []).map(s => s.store_name), [stats])
-  const isLoad       = loading || loadingHealth
+    if (STORES_CACHE.data && Date.now() - STORES_CACHE.ts < STALE_MS) return
+    if (!STORES_CACHE.data) setLoading(true)
 
-  const totalEbay   = Number(health?.total_ebay_rows  || 0)
-  const totalAutods = Number(health?.total_autods      || 0)
-  const matched     = Number(health?.matched_rows      || 0)
-  const matchedUniq = Number(health?.matched_unique    || 0)
-  const matchPct    = pct(matched, totalEbay)
-  const activeRisk  = Number(health?.total_at_risk     || 0)
-
-  const browseTabObj = BROWSE_TABS.find(t => t.id === browseTab)
-
-  function handleRefresh() {
-    STATS_CACHE.data = null; HEALTH_CACHE.data = null
-    setLoading(true); setLoadingHealth(true)
-    window.location.reload()
+    const [storeData, sumData, supData] = await Promise.all([
+      api.get('/api/stores/combined'),
+      api.get('/api/stores/summary'),
+      api.get('/api/stores/suppliers'),
+    ])
+    if (Array.isArray(storeData))           { setStores(storeData);    STORES_CACHE.data   = storeData;  STORES_CACHE.ts   = Date.now() }
+    if (sumData && !Array.isArray(sumData)) { setSummary(sumData);     SUMMARY_CACHE.data  = sumData;    SUMMARY_CACHE.ts  = Date.now() }
+    if (supData && !Array.isArray(supData)) { setSuppliers(supData);   SUPPLIER_CACHE.data = supData;    SUPPLIER_CACHE.ts = Date.now() }
+    setLoading(false)
   }
+  load()
+}, [])
+
+  const filteredStores = useMemo(() => stores.filter(store => {
+    if (search && !store.store_name.toLowerCase().includes(search.toLowerCase())) return false
+    if (supplierFilter && Number(store[supplierFilter] || 0) === 0) return false
+    if (stockFilter === 'in'  && Number(store.active_listings || 0) === 0) return false
+    if (stockFilter === 'out' && Number(store.out_of_stock    || 0) === 0) return false
+    return true
+  }), [stores, search, supplierFilter, stockFilter])
+
+  const globalLastUpdated = useMemo(() => stores.reduce((latest, s) =>
+    !latest || new Date(s.last_updated) > new Date(latest) ? s.last_updated : latest
+  , null), [stores])
+
+  // eBay numbers (all suppliers) — from ebay_store_stats via summary
+  const totalListings = Number(summary?.total_listings || 0)
+  const totalActive   = Number(summary?.total_active   || 0)
+  const totalOos      = Number(summary?.total_oos       || 0)
+  const storeCount    = stores.length
+
+  // Amazon/AutoDS numbers — from summary_cache
+  const amazonTotal  = Number(summary?.ebay_total_amazon || 0)
+  const amazonActive = Number(summary?.ebay_active        || 0)
+  const amazonOos    = Number(summary?.ebay_oos           || 0)
+  const autodsTotal  = Number(summary?.autods_total       || 0)
+  const paired       = Number(summary?.paired             || 0)
+  const notUpdating  = Number(summary?.not_updating       || 0) + Number(summary?.not_updating_azdp || 0)
+  const notOnEbay    = Number(summary?.not_on_ebay        || 0)
+  const pairedPct    = pct(paired, amazonTotal)
+
+  const noData    = !loading && stores.length === 0
+  const storeCols = filteredStores.length === 1 ? 1 : filteredStores.length >= 5 ? 3 : 2
+
+  if (selectedStore) return <StoreListingsPage storeName={selectedStore} onBack={() => setSelectedStore(null)} />
 
   return (
     <div className="p-6 space-y-6">
 
-      {/* ── Summary stat cards — same grid as EbayTab ── */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <SummaryCard label="eBay Amazon Listings" value={totalEbay}
-          subLabel="Total Amazon SKUs on eBay" accent="#3b82f6" Icon={Package} loading={isLoad} />
-        <SummaryCard label="AutoDS Products" value={totalAutods}
-          subLabel="ASINs monitored in AutoDS" accent="#8b5cf6" Icon={Activity} loading={isLoad} />
-        <SummaryCard label="Matched & Healthy" value={matched}
-          subLabel={`${matchPct}% coverage rate`} accent="#22c55e" Icon={CheckCircle2}
-          badge={`${matchPct}%`} loading={isLoad} />
-        <SummaryCard label="At Risk (Active)" value={activeRisk}
-          subLabel="Live listings with no AutoDS" accent="#ef4444" Icon={AlertTriangle} loading={isLoad} />
+      {/* ── eBay summary (all suppliers) ── */}
+      <div>
+        <p className="text-xs text-muted-foreground font-medium mb-3">
+          eBay Overview <span className="opacity-50">— all suppliers</span>
+          {!loading && (
+  <>
+            {lastSynced.ebay && (
+              <span className="ml-2 opacity-60">· eBay synced {timeAgo(lastSynced.ebay)}</span>
+            )}
+            {lastSynced.autods && (
+              <span className="ml-2 opacity-60">· AutoDS synced {timeAgo(lastSynced.autods)}</span>
+            )}
+          </>
+        )}
+        </p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+          <SummaryCard label="Total Listings"  value={totalListings} trendLabel="total this period"  subLabel="All eBay store listings"         loading={loading} />
+          <SummaryCard label="Active Listings" value={totalActive}   trendLabel="active this period" subLabel="Currently in stock & live"        loading={loading} />
+          <SummaryCard label="Out of Stock"    value={totalOos}      trendLabel="out of stock items" subLabel="Needs restocking attention"       loading={loading} />
+          <SummaryCard label="Stores"          value={storeCount}    trendLabel="connected stores"   subLabel="eBay seller accounts tracked"     loading={loading} />
+        </div>
       </div>
 
-      {/* Last cached */}
-      {!isLoad && health?.computed_at && (
-        <p className="text-xs text-muted-foreground -mt-4">
-          Cache: {timeAgo(health.computed_at)}
-          <button onClick={handleRefresh} className="ml-3 inline-flex items-center gap-1 hover:text-foreground transition-colors">
-            <RefreshCw size={10} /> Refresh
-          </button>
-        </p>
-      )}
+      {/* ── Supplier breakdown ── */}
+      <SupplierSummaryCards suppliers={suppliers} loading={loading} />
 
-      {/* ── Main layout: left content + right sidebar — same as EbayTab ── */}
+      {/* ── Amazon + AutoDS summary ── */}
+      <div>
+        <p className="text-xs text-muted-foreground font-medium mb-3">
+          Amazon + AutoDS <span className="opacity-50">— pairing health</span>
+        </p>
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-4">
+          <SummaryCard label="Amazon on eBay"   value={amazonTotal}  trendLabel="Amazon SKUs on eBay"       subLabel="A-prefix and AZDP listings"     loading={loading} />
+          <SummaryCard label="Amazon Active"    value={amazonActive} trendLabel="active Amazon listings"     subLabel="Currently in stock & live"       loading={loading} />
+          <SummaryCard label="Amazon OOS"       value={amazonOos}    trendLabel="Amazon out of stock"        subLabel="No stock on eBay"                loading={loading} />
+          <SummaryCard label="AutoDS Products"  value={autodsTotal}  trendLabel="ASINs monitored"            subLabel="In AutoDS monitoring"            loading={loading} />
+          <SummaryCard label="Paired w/ AutoDS" value={paired}       trendLabel={`${pairedPct}% pair rate`}  subLabel="Amazon listings monitored"       accent="#22c55e"  loading={loading} />
+          <SummaryCard label="Not Updating"     value={notUpdating}  trendLabel="listings at risk"           subLabel="No AutoDS monitoring"            accent="#ef4444"  loading={loading} />
+        </div>
+      </div>
+
+      {/* ── Main layout ── */}
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_300px] gap-6 items-start">
 
         {/* LEFT */}
         <div className="space-y-6">
 
-          {/* Flow: two source nodes */}
-          <div className="grid grid-cols-2 gap-4">
-            {[
-              { title: 'AutoDS Products', count: totalAutods, sub: 'Amazon ASINs monitored', style: 'border-teal-200 bg-teal-50', t: 'text-teal-700', c: 'text-teal-800' },
-              { title: 'eBay Listings',   count: totalEbay,   sub: 'Amazon SKUs listed',     style: 'border-blue-200 bg-blue-50', t: 'text-blue-700', c: 'text-blue-800' },
-            ].map(({ title, count, sub, style, t, c }) => (
-              <div key={title} className={`rounded-2xl border-2 p-6 ${style}`}>
-                <p className={`text-[10px] font-bold uppercase tracking-widest mb-1 ${t}`}>{title}</p>
-                {isLoad
-                  ? <div className="h-8 w-24 bg-current opacity-20 rounded animate-pulse" />
-                  : <p className={`text-3xl font-bold tabular-nums ${c}`}>{fmt(count)}</p>}
-                <p className={`text-xs mt-1 ${t} opacity-80`}>{sub}</p>
-              </div>
-            ))}
-          </div>
-
-          {/* Arrows */}
-          <div className="grid grid-cols-2 gap-4">
-            {[0,1].map(i => (
-              <div key={i} className="flex flex-col items-center gap-0">
-                <div className="w-px h-4 border-l-2 border-gray-300" />
-                <ArrowDown size={11} className="text-gray-400 -mt-0.5" />
-              </div>
-            ))}
-          </div>
-
-          {/* Matched block */}
-          <div className="rounded-2xl border-2 border-green-300 bg-green-50 p-6">
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex-1">
-                <div className="flex items-center gap-1.5 mb-1">
-                  <CheckCircle2 size={13} className="text-green-600" />
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-green-700">Matched &amp; Healthy</span>
-                </div>
-                {isLoad
-                  ? <div className="h-10 w-28 bg-green-200 rounded animate-pulse" />
-                  : <p className="text-4xl font-bold text-green-800 tabular-nums">{fmt(matched)}</p>}
-                <p className="text-xs text-green-600 mt-1">
-                  {fmt(matchedUniq)} unique ASINs · {matchPct}% of eBay · {health?.total_stores || '—'} stores
-                </p>
-                <div className="mt-3 h-1.5 bg-green-200 rounded-full overflow-hidden max-w-sm">
-                  <div className="h-full bg-green-500 rounded-full transition-all duration-700" style={{ width: `${matchPct}%` }} />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Divider */}
-          <div className="flex items-center gap-3">
-            <div className="flex-1 border-t border-dashed border-gray-300" />
-            <span className="text-[10px] text-gray-400 font-bold tracking-widest uppercase">PROBLEMS BELOW</span>
-            <div className="flex-1 border-t border-dashed border-gray-300" />
-          </div>
-
-          {/* Problem cards 2×2 */}
-          <div className="grid grid-cols-2 gap-4">
-            {PROBLEMS.map(p => <ProblemCard key={p.key} p={p} health={health} loading={isLoad} />)}
-          </div>
-
-          {/* Charts row — mirrors EbayTab two-chart row */}
+          {/* Charts */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <UnmonitoredStoresChart health={health} loading={isLoad} />
-            <AutodsCoverageChart    health={health} loading={isLoad} />
+            <TopStoresChart  stores={stores} loading={loading} />
+            <OutOfStockChart stores={stores} loading={loading} />
           </div>
 
-        
-        
+          {/* Exports */}
+          <ExportSection summary={summary} loading={loading} />
 
-          {/* Export row */}
-          <div>
-            <p className="text-xs text-muted-foreground font-medium mb-3">
-              Export SKU lists <span className="opacity-50">— CSV to fix in AutoDS or bulk-end on eBay</span>
-            </p>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-              <ExportBtn status="active_no_autods" label="Active — no AutoDS" count={health?.active_no_autods} color="#ef4444" bg="bg-red-50 border-red-200"      BtnIcon={ShieldAlert}  />
-              <ExportBtn status="active_no_skumap" label="Active — no SKU"    count={health?.active_no_skumap} color="#f97316" bg="bg-orange-50 border-orange-200" BtnIcon={Unlink}       />
-              <ExportBtn status="dead_no_autods"   label="Dead — no AutoDS"   count={health?.dead_no_autods}   color="#9ca3af" bg="bg-gray-50 border-gray-200"     BtnIcon={Trash2}       />
-              <ExportBtn status="matched"          label="All matched"         count={health?.matched_rows}     color="#22c55e" bg="bg-green-50 border-green-200"   BtnIcon={CheckCircle2} />
-            <ExportBtn 
-                status="_autods_only" 
-                directUrl={`${import.meta.env.VITE_API_URL || ''}/api/sync/export-autods-only`}
-                label="AutoDS — not listed" 
-                count={health?.autods_not_ebay} 
-                color="#3b82f6" 
-                bg="bg-blue-50 border-blue-200" 
-                BtnIcon={Package} 
+          {/* Store cards */}
+          <div className="space-y-4">
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground font-medium">
+                Stores <span className="opacity-50">({stores.length})</span>
+              </p>
+              {!loading && stores.length > 0 && (
+                <FilterBar
+                  search={search} onSearch={setSearch}
+                  supplierFilter={supplierFilter} onSupplierFilter={setSupplierFilter}
+                  stockFilter={stockFilter} onStockFilter={setStockFilter}
+                  resultCount={filteredStores.length} totalCount={stores.length}
                 />
+              )}
             </div>
-          </div>
 
-          {/* Browse listings */}
-          <div className="space-y-3">
-            <p className="text-xs text-muted-foreground font-medium">
-              Browse listings <span className="opacity-50">({BROWSE_TABS.find(t => t.id === browseTab)?.desc})</span>
-            </p>
-            <div className="flex items-center gap-1 border-b border-border">
-              {BROWSE_TABS.map(tab => (
-                <button key={tab.id} onClick={() => setBrowseTab(tab.id)}
-                  className={`px-4 py-2 text-xs font-medium border-b-2 -mb-px transition-colors ${browseTab === tab.id ? 'border-foreground text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`}>
-                  {tab.label}
+            {loading ? (
+              <div className="grid grid-cols-2 gap-4">
+                {Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)}
+              </div>
+            ) : noData ? (
+              <div className="flex flex-col items-center justify-center py-20 gap-3">
+                <ShoppingBag size={28} className="text-muted-foreground/30" />
+                <p className="text-sm text-muted-foreground font-medium">No store data yet</p>
+                <p className="text-xs text-muted-foreground/60">Run the Python script to push your first snapshot</p>
+              </div>
+            ) : filteredStores.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20 gap-3">
+                <Search size={28} className="text-muted-foreground/30" />
+                <p className="text-sm text-muted-foreground font-medium">No stores match your filters</p>
+                <button onClick={() => { setSearch(''); setSupplierFilter(''); setStockFilter('') }}
+                  className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 transition-colors">
+                  Clear filters
                 </button>
-              ))}
-            </div>
-            {browseTabObj && (
-              <BrowseTable key={browseTab} endpoint={browseTabObj.endpoint} storeOptions={storeOptions} />
+              </div>
+            ) : (
+              <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${storeCols}, minmax(0, 1fr))` }}>
+                {filteredStores.map(store => (
+                  <StoreCard key={store.store_name} store={store} onSelect={setSelectedStore} />
+                ))}
+              </div>
             )}
           </div>
         </div>
 
-        {/* RIGHT SIDEBAR — same sticky pattern as EbayTab */}
+        {/* RIGHT SIDEBAR */}
         <div className="xl:sticky xl:top-6 space-y-4">
-          <MatchRateRadial matched={matched} total={totalEbay} loading={isLoad} />
-          <RiskDonut health={health} loading={isLoad} />
-          {/* AutoDS coverage mini bars */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm">AutoDS Coverage</CardTitle>
-              <CardDescription className="text-xs">{fmt(totalAutods)} ASINs monitored</CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {[
-                { label: 'Has eBay listing', value: health?.autods_on_ebay  || 0, color: '#3b82f6' },
-                { label: 'No eBay listing',  value: health?.autods_not_ebay || 0, color: '#f59e0b' },
-              ].map(b => <CoverageBar key={b.label} {...b} total={totalAutods} />)}
-            </CardContent>
-          </Card>
+          <ActiveRateRadial   summary={summary} loading={loading} />
+          <PairRateRadial     summary={summary} loading={loading} />
+          <SyncStatusCard     summary={summary} loading={loading} />
+          <SupplierDonutChart stores={stores}   loading={loading} />
         </div>
       </div>
     </div>

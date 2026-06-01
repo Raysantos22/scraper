@@ -1,4 +1,4 @@
-// EbayTab.jsx — src/pages/ebay/EbayTab.jsx
+// C:\Users\ADMIN\scraper\src\pages\ebay\EbayTab.jsx
 import React, { useState, useEffect, useMemo } from 'react'
 import { api } from '../../lib/api'
 import {
@@ -6,8 +6,9 @@ import {
   PieChart, Pie, Sector, BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell,
 } from 'recharts'
 import {
-  TrendingUp, TrendingDown, Minus,
-  ShoppingBag, Search, X, SlidersHorizontal,
+  TrendingUp, ShoppingBag, Search, X, SlidersHorizontal,
+  Download, AlertCircle, CheckCircle2, Clock,
+  PackageX, PackageCheck, Package, Zap, ZapOff, ListX,
 } from 'lucide-react'
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter,
@@ -15,19 +16,25 @@ import {
 import {
   ChartContainer, ChartTooltip, ChartTooltipContent,
 } from '@/components/ui/chart'
-import StoreListingsPage from './StoreListingsPage'
+import StoreListingsPage from '../ebay/StoreListingsPage'
+import BannedSkusPage from '../ebay/BannedSkusPage'
+
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
-const SUMMARY_CACHE = { data: null, ts: 0 }
-const STALE_MS      = 60_000
+const STORES_CACHE   = { data: null, ts: 0 }
+const SUMMARY_CACHE  = { data: null, ts: 0 }
+const SUPPLIER_CACHE = { data: null, ts: 0 }
+const STALE_MS       = 60_000
 
-// ─── Theme colors ─────────────────────────────────────────────────────────────
-const RED    = '#ef4444'   // active / primary
-const PINK   = '#fca5a5'   // out of stock / secondary (light red)
-const RED_DK = '#b91c1c'   // dark accent
+const RED   = '#ef4444'
+const PINK  = '#fca5a5'
+const GREEN = '#22c55e'
+const AMBER = '#f59e0b'
+const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmt = n => Number(n || 0).toLocaleString()
+const pct = (n, d) => (d > 0 ? Math.round((Number(n) / Number(d)) * 100) : 0)
 
 function timeAgo(dateStr) {
   if (!dateStr) return null
@@ -41,8 +48,13 @@ function timeAgo(dateStr) {
   return `${days}d ago`
 }
 
-// ─── Suppliers ────────────────────────────────────────────────────────────────
-const SUPPLIERS = [
+function pairColor(p) {
+  if (p > 80) return 'text-green-600'
+  if (p > 50) return 'text-amber-500'
+  return 'text-red-500'
+}
+
+const SUPPLIERS_DEF = [
   { key: 'ozh_items',        label: 'OZH',         fill: '#ef4444' },
   { key: 'priceline_items',  label: 'Priceline',   fill: '#f97316' },
   { key: 'totaltools_items', label: 'Total Tools', fill: '#eab308' },
@@ -58,26 +70,6 @@ function chunkArray(arr, size) {
   const out = []
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
   return out
-}
-
-// ─── Trend badge ──────────────────────────────────────────────────────────────
-function TrendBadge({ pct }) {
-  if (pct === null) return null
-  if (pct === 0) return (
-    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground border border-border rounded-full px-2 py-0.5">
-      <Minus size={10} /> 0%
-    </span>
-  )
-  const up = pct > 0
-  return (
-    <span className={`inline-flex items-center gap-1 text-xs border rounded-full px-2 py-0.5 ${
-      up ? 'text-emerald-700 border-emerald-200 bg-emerald-50'
-         : 'text-red-600 border-red-200 bg-red-50'
-    }`}>
-      {up ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
-      {up ? '+' : ''}{pct}%
-    </span>
-  )
 }
 
 // ─── Skeletons ────────────────────────────────────────────────────────────────
@@ -120,65 +112,164 @@ function SkeletonChart({ height = 'h-[240px]' }) {
         <div className="h-3 w-32 bg-muted rounded mb-2" />
         <div className="h-2 w-24 bg-muted/60 rounded" />
       </CardHeader>
-      <CardContent>
-        <div className={`${height} bg-muted/40 rounded-lg`} />
-      </CardContent>
+      <CardContent><div className={`${height} bg-muted/40 rounded-lg`} /></CardContent>
     </Card>
   )
 }
 
-// ─── Summary stat card ────────────────────────────────────────────────────────
-function SummaryCard({ label, value, trendPct, trendLabel, subLabel, loading }) {
+// ─── Summary card ─────────────────────────────────────────────────────────────
+function SummaryCard({ label, value, subLabel, trendLabel, accent, loading, compact }) {
   if (loading) return <SkeletonSummaryCard />
   return (
     <Card className="flex-1 min-w-0">
-      <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-2">
-          <CardDescription className="text-xs font-medium">{label}</CardDescription>
-          <TrendBadge pct={trendPct} />
-        </div>
-        <CardTitle className="text-3xl font-bold tracking-tight">{fmt(value)}</CardTitle>
+      <CardHeader className={compact ? 'pb-1 px-3 pt-3' : 'pb-2'}>
+        <CardDescription className={`font-medium truncate ${compact ? 'text-xs' : 'text-xs'}`}>{label}</CardDescription>
+        <CardTitle
+          className={`font-bold tracking-tight ${compact ? 'text-xl leading-tight' : 'text-3xl'}`}
+          style={accent ? { color: accent } : {}}
+        >
+          {fmt(value)}
+        </CardTitle>
       </CardHeader>
-      <CardContent className="pt-0">
-        <div className="flex items-center gap-1 text-sm font-medium">
-          {trendPct > 0 ? <TrendingUp size={13} /> : trendPct < 0 ? <TrendingDown size={13} /> : null}
-          {trendLabel}
-        </div>
-        <p className="text-xs text-muted-foreground mt-0.5">{subLabel}</p>
+      <CardContent className={compact ? 'pt-0 px-3 pb-3' : 'pt-0'}>
+        <div className={`font-medium text-foreground truncate ${compact ? 'text-xs' : 'text-sm'}`}>{trendLabel}</div>
+        <p className={`text-muted-foreground mt-0.5 truncate ${compact ? 'text-[10px]' : 'text-xs'}`}>{subLabel}</p>
       </CardContent>
     </Card>
   )
 }
 
-// ─── Stacked bar: top 10 stores — red=active, pink=oos ───────────────────────
-function TopStoresChart({ summary, loading }) {
-  const data = useMemo(() => [...summary]
+// ─── Stat row inside store card ───────────────────────────────────────────────
+function StatRow({ items }) {
+  const cells = [...items]
+  while (cells.length < 3) cells.push({ label: '', val: '' })
+  return (
+    <div className="flex border-border pt-4">
+      {cells.map((item, i) => {
+        const hasContent  = !!item.label
+        const prevContent = i > 0 && !!cells[i - 1].label
+        return (
+          <div key={i} className={`flex-1 min-w-0
+            ${hasContent && prevContent ? 'border-l border-border pl-4' : ''}
+            ${hasContent && i < 2 && cells[i + 1]?.label ? 'pr-4' : ''}`}>
+            {hasContent && <>
+              <p className="text-[9px] font-semibold uppercase tracking-widest text-muted-foreground mb-1.5 truncate">{item.label}</p>
+              <p className={`text-xl font-bold leading-none ${item.color || 'text-foreground'}`}>{item.val}</p>
+            </>}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function DividerLabel({ label }) {
+  return (
+    <div className="flex items-center gap-2 pt-4 pb-1">
+      <div className="h-px flex-1 bg-border" />
+      <span className="text-[9px] font-semibold uppercase tracking-widest text-muted-foreground/60">{label}</span>
+      <div className="h-px flex-1 bg-border" />
+    </div>
+  )
+}
+
+// ─── Store card ───────────────────────────────────────────────────────────────
+function StoreCard({ store, onSelect }) {
+  const total       = Number(store.total_items       || 0)
+  const active      = Number(store.active_listings   || 0)
+  const oos         = Number(store.out_of_stock      || 0)
+  const amazon      = Number(store.amazon_items      || 0)
+  const other       = Number(store.other_items       || 0)
+  const paired      = Number(store.paired            || 0)
+  const notUpd      = Number(store.not_updating      || 0)
+  const notUpdAzdp  = Number(store.not_updating_azdp || 0)
+  const bannedCount = Number(store.banned_count      || 0)
+  const totalRisk   = notUpd + notUpdAzdp
+  const hasBanned   = bannedCount > 0
+  const pairedPct   = pct(paired, amazon || total)
+
+  const activeSuppliers = SUPPLIERS_DEF
+    .filter(s => s.key !== 'amazon_items' && s.key !== 'other_items' && Number(store[s.key] || 0) > 0)
+    .map(s => ({ label: s.label, val: fmt(Number(store[s.key])) }))
+  const supChunks = chunkArray(activeSuppliers, 3)
+  const hasSync   = paired > 0 || totalRisk > 0
+
+  return (
+    <button
+      onClick={() => onSelect(store.store_name)}
+      className={`text-left rounded-2xl p-7 w-full shadow-sm transition-all duration-300 ease-out hover:-translate-y-1 hover:cursor-pointer
+        ${hasBanned
+          ? 'bg-red-50/60 border-2 border-red-400 hover:shadow-[0_12px_30px_rgba(239,68,68,0.25)]'
+          : 'bg-card border border-black/70 hover:shadow-[0_12px_30px_rgba(0,0,0,0.18)]'
+        }`}
+    >
+      <div className="flex items-start justify-between mb-1">
+        <h3 className="text-2xl font-black text-foreground capitalize leading-tight">{store.store_name}</h3>
+        {hasBanned && (
+          <span className="flex items-center gap-1 text-[10px] font-bold text-white bg-red-500 px-2 py-0.5 rounded-full ml-2 flex-shrink-0 animate-pulse">
+            ⚠ {bannedCount} BANNED
+          </span>
+        )}
+      </div>
+      {store.last_updated && (
+        <p className="text-[10px] text-muted-foreground mb-3">Updated {timeAgo(store.last_updated)}</p>
+      )}
+      <StatRow items={[
+        { label: 'All Items',    val: fmt(total)  },
+        { label: 'Active',       val: fmt(active) },
+        { label: 'Out of Stock', val: fmt(oos)    },
+      ]} />
+      {(amazon > 0 || other > 0) && (
+        <StatRow items={[
+          { label: 'Amazon', val: fmt(amazon) },
+          { label: 'Other',  val: fmt(other)  },
+          { label: '',       val: ''          },
+        ]} />
+      )}
+      {supChunks.map((chunk, i) => <StatRow key={i} items={chunk} />)}
+      {hasSync && (
+        <>
+          <DividerLabel label="AutoDS Sync" />
+          <StatRow items={[
+            { label: 'Paired ✓',     val: fmt(paired),     color: pairColor(pairedPct) },
+            { label: 'Not Updating', val: fmt(totalRisk),  color: totalRisk > 0 ? 'text-red-500' : 'text-foreground' },
+            { label: 'Pair Rate',    val: `${pairedPct}%`, color: pairColor(pairedPct) },
+          ]} />
+        </>
+      )}
+      {hasBanned && (
+        <>
+          <DividerLabel label="⚠ Banned SKUs" />
+          <StatRow items={[
+            { label: 'Banned Live', val: fmt(bannedCount), color: 'text-red-500' },
+            { label: '',            val: ''                                       },
+            { label: '',            val: ''                                       },
+          ]} />
+        </>
+      )}
+    </button>
+  )
+}
+
+// ─── Charts ───────────────────────────────────────────────────────────────────
+function TopStoresChart({ stores, loading }) {
+  const data = useMemo(() => [...stores]
     .sort((a, b) => Number(b.total_items) - Number(a.total_items))
     .slice(0, 10)
     .map(s => ({
       name:   s.store_name.replace(/au$/i, '').slice(0, 9),
       active: Number(s.active_listings),
       oos:    Number(s.out_of_stock),
-    })), [summary])
-
-  const config = {
-    active: { label: 'Active',       color: RED  },
-    oos:    { label: 'Out of Stock', color: PINK },
-  }
-
+    })), [stores])
+  const config = { active: { label: 'Active', color: RED }, oos: { label: 'Out of Stock', color: PINK } }
   if (loading) return <SkeletonChart height="h-[240px]" />
-
   return (
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="text-sm">Top 10 Stores by Listings</CardTitle>
         <CardDescription className="text-xs flex items-center gap-4 mt-1">
-          <span className="flex items-center gap-1.5">
-            <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: RED }} /> Active
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: PINK }} /> Out of Stock
-          </span>
+          <span className="flex items-center gap-1.5"><span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: RED }} /> Active</span>
+          <span className="flex items-center gap-1.5"><span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: PINK }} /> Out of Stock</span>
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -186,8 +277,7 @@ function TopStoresChart({ summary, loading }) {
           <BarChart data={data} margin={{ top: 0, right: 0, left: -20, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
             <XAxis dataKey="name" tick={{ fontSize: 8 }} tickLine={false} axisLine={false} />
-            <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false}
-              tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v} />
+            <YAxis tick={{ fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v} />
             <ChartTooltip content={<ChartTooltipContent />} />
             <Bar dataKey="active" stackId="a" fill={RED}  radius={[0,0,0,0]} />
             <Bar dataKey="oos"    stackId="a" fill={PINK} radius={[3,3,0,0]} />
@@ -198,27 +288,18 @@ function TopStoresChart({ summary, loading }) {
   )
 }
 
-// ─── Horizontal bar: out of stock — shades of red ────────────────────────────
-function OutOfStockChart({ summary, loading }) {
-  // 10 shades from deep red to light pink
-  const SHADES = [
-    '#7f1d1d','#991b1b','#b91c1c','#dc2626',
-    '#ef4444','#f87171','#fca5a5','#fecaca','#fee2e2','#fff1f2',
-  ]
-
-  const data = useMemo(() => [...summary]
+function OutOfStockChart({ stores, loading }) {
+  const SHADES = ['#7f1d1d','#991b1b','#b91c1c','#dc2626','#ef4444','#f87171','#fca5a5','#fecaca','#fee2e2','#fff1f2']
+  const data = useMemo(() => [...stores]
     .sort((a, b) => Number(b.out_of_stock) - Number(a.out_of_stock))
     .slice(0, 10)
     .map((s, i) => ({
       name: s.store_name.replace(/au$/i, '').slice(0, 10),
       oos:  Number(s.out_of_stock),
       fill: SHADES[i],
-    })), [summary])
-
+    })), [stores])
   const config = { oos: { label: 'Out of Stock', color: RED } }
-
   if (loading) return <SkeletonChart height="h-[240px]" />
-
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -229,14 +310,11 @@ function OutOfStockChart({ summary, loading }) {
         <ChartContainer config={config} className="h-[220px] w-full">
           <BarChart data={data} layout="vertical" margin={{ top: 0, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f3f4f6" />
-            <XAxis type="number" tick={{ fontSize: 9 }} tickLine={false} axisLine={false}
-              tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v} />
+            <XAxis type="number" tick={{ fontSize: 9 }} tickLine={false} axisLine={false} tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v} />
             <YAxis type="category" dataKey="name" tick={{ fontSize: 8 }} tickLine={false} axisLine={false} width={60} />
             <ChartTooltip content={<ChartTooltipContent hideLabel />} />
             <Bar dataKey="oos" radius={[0,4,4,0]}>
-              {data.map((entry, i) => (
-                <Cell key={i} fill={entry.fill} />
-              ))}
+              {data.map((entry, i) => <Cell key={i} fill={entry.fill} />)}
             </Bar>
           </BarChart>
         </ChartContainer>
@@ -245,40 +323,34 @@ function OutOfStockChart({ summary, loading }) {
   )
 }
 
-// ─── Radial: active listing rate — red arc ────────────────────────────────────
-function ActiveRateRadial({ total, active, loading }) {
-  const pct = total > 0 ? Math.round((active / total) * 100) : 0
-  const chartData = [{ name: 'active', value: pct, fill: RED }]
-  const config = { active: { label: 'Active Rate', color: RED } }
-
+// ─── Sidebar charts ───────────────────────────────────────────────────────────
+function ActiveRateRadial({ summary, loading }) {
+  const total  = Number(summary?.total_listings || 0)
+  const active = Number(summary?.total_active   || 0)
+  const p      = pct(active, total)
+  const chartData = [{ value: p, fill: RED }]
+  const config    = { active: { label: 'Active Rate', color: RED } }
   if (loading) return <SkeletonChart height="h-[200px]" />
-
   return (
     <Card className="flex flex-col">
       <CardHeader className="items-center pb-0">
         <CardTitle className="text-sm">Active Listing Rate</CardTitle>
-        <CardDescription className="text-xs">Products vs active listings</CardDescription>
+        <CardDescription className="text-xs">All eBay listings (all suppliers)</CardDescription>
       </CardHeader>
       <CardContent className="flex-1 pb-0">
         <ChartContainer config={config} className="mx-auto aspect-square max-h-[180px]">
-          <RadialBarChart data={chartData} endAngle={(pct / 100) * 360} innerRadius={58} outerRadius={85}>
-            <PolarGrid gridType="circle" radialLines={false} stroke="none"
-              className="first:fill-muted last:fill-background" polarRadius={[76, 64]} />
+          <RadialBarChart data={chartData} endAngle={(p / 100) * 360} innerRadius={58} outerRadius={85}>
+            <PolarGrid gridType="circle" radialLines={false} stroke="none" className="first:fill-muted last:fill-background" polarRadius={[76, 64]} />
             <RadialBar dataKey="value" background={{ fill: '#fee2e2' }} fill={RED} />
             <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
               <Label content={({ viewBox }) => {
-                if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
-                  return (
-                    <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
-                      <tspan x={viewBox.cx} y={viewBox.cy} fontSize={28} fontWeight={700} fill="#111">
-                        {`${pct}%`}
-                      </tspan>
-                      <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 20} fontSize={10} fill="#9ca3af">
-                        In stock
-                      </tspan>
-                    </text>
-                  )
-                }
+                if (!viewBox || !('cx' in viewBox)) return null
+                return (
+                  <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
+                    <tspan x={viewBox.cx} y={viewBox.cy} fontSize={28} fontWeight={700} fill="#111">{p}%</tspan>
+                    <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 20} fontSize={10} fill="#9ca3af">In stock</tspan>
+                  </text>
+                )
               }} />
             </PolarRadiusAxis>
           </RadialBarChart>
@@ -295,26 +367,109 @@ function ActiveRateRadial({ total, active, loading }) {
   )
 }
 
-// ─── Donut: supplier breakdown ────────────────────────────────────────────────
-function SupplierDonutChart({ summary, loading }) {
+function PairRateRadial({ summary, loading }) {
+  const paired = Number(summary?.paired            || 0)
+  const total  = Number(summary?.ebay_total_amazon || 0)
+  const p      = pct(paired, total)
+  const color  = p > 80 ? GREEN : p > 50 ? AMBER : RED
+  const bgFill = p > 80 ? '#dcfce7' : p > 50 ? '#fef3c7' : '#fee2e2'
+  const chartData = [{ value: p, fill: color }]
+  const config    = { pair: { label: 'Pair Rate', color } }
+  if (loading) return <SkeletonChart height="h-[200px]" />
+  return (
+    <Card className="flex flex-col">
+      <CardHeader className="items-center pb-0">
+        <CardTitle className="text-sm">AutoDS Pair Rate</CardTitle>
+        <CardDescription className="text-xs">Amazon eBay listings with AutoDS</CardDescription>
+      </CardHeader>
+      <CardContent className="flex-1 pb-0">
+        <ChartContainer config={config} className="mx-auto aspect-square max-h-[180px]">
+          <RadialBarChart data={chartData} endAngle={(p / 100) * 360} innerRadius={58} outerRadius={85}>
+            <PolarGrid gridType="circle" radialLines={false} stroke="none" className="first:fill-muted last:fill-background" polarRadius={[76, 64]} />
+            <RadialBar dataKey="value" background={{ fill: bgFill }} fill={color} />
+            <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
+              <Label content={({ viewBox }) => {
+                if (!viewBox || !('cx' in viewBox)) return null
+                return (
+                  <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
+                    <tspan x={viewBox.cx} y={viewBox.cy} fontSize={28} fontWeight={700} fill="#111">{p}%</tspan>
+                    <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 20} fontSize={10} fill="#9ca3af">Paired</tspan>
+                  </text>
+                )
+              }} />
+            </PolarRadiusAxis>
+          </RadialBarChart>
+        </ChartContainer>
+      </CardContent>
+      <CardFooter className="flex-col gap-1 text-sm pt-2">
+        <div className="flex items-center gap-2 font-medium leading-none text-xs">
+          {fmt(paired)} of {fmt(total)} paired
+          <TrendingUp className="h-3 w-3" style={{ color }} />
+        </div>
+        <div className="leading-none text-muted-foreground text-xs">AutoDS coverage</div>
+      </CardFooter>
+    </Card>
+  )
+}
+
+function SyncStatusCard({ summary, loading }) {
+  if (loading) return <SkeletonChart height="h-[160px]" />
+  const total       = Number(summary?.ebay_total_amazon || 0)
+  const paired      = Number(summary?.paired            || 0)
+  const notUpd      = Number(summary?.not_updating      || 0)
+  const notUpdAzdp  = Number(summary?.not_updating_azdp || 0)
+  const notOnEbay   = Number(summary?.not_on_ebay       || 0)
+  const autodsTotal = Number(summary?.autods_total      || 0)
+  const computedAt  = summary?.computed_at
+
+  const bars = [
+    { label: 'Paired ✓',        value: paired,     color: GREEN, total },
+    { label: 'Not Updating',    value: notUpd,     color: RED,   total },
+    { label: 'Not Upd. (AZDP)', value: notUpdAzdp, color: PINK,  total },
+    { label: 'Not on eBay',     value: notOnEbay,  color: AMBER, total: autodsTotal },
+  ]
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">eBay Sync Status</CardTitle>
+        <CardDescription className="text-xs">
+          Amazon listings pairing
+          {computedAt && <span className="ml-1 opacity-60">· cache {timeAgo(computedAt)}</span>}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {bars.map(b => {
+          const p = pct(b.value, b.total)
+          return (
+            <div key={b.label} className="space-y-1">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">{b.label}</span>
+                <span className="font-medium tabular-nums">{fmt(b.value)} <span className="text-muted-foreground/50">({p}%)</span></span>
+              </div>
+              <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                <div className="h-full rounded-full transition-all duration-700" style={{ width: `${p}%`, background: b.color }} />
+              </div>
+            </div>
+          )
+        })}
+        <p className="text-[10px] text-muted-foreground pt-1">{fmt(paired)} of {fmt(total)} Amazon eBay listings synced</p>
+      </CardContent>
+    </Card>
+  )
+}
+
+function SupplierDonutChart({ stores, loading }) {
   const [activeIndex, setActiveIndex] = useState(0)
- 
-  const pieData = useMemo(() => SUPPLIERS.map(s => ({
-    key:      s.key,
-    supplier: s.label,
-    items:    summary.reduce((acc, store) => acc + Number(store[s.key] || 0), 0),
-    fill:     s.fill,
-  })).filter(s => s.items > 0).sort((a, b) => b.items - a.items), [summary])
- 
-  const config = useMemo(() => Object.fromEntries(
-    pieData.map(s => [s.supplier, { label: s.supplier, color: s.fill }])
-  ), [pieData])
- 
+  const pieData = useMemo(() => SUPPLIERS_DEF.map(s => ({
+    key: s.key, supplier: s.label,
+    items: stores.reduce((acc, store) => acc + Number(store[s.key] || 0), 0),
+    fill: s.fill,
+  })).filter(s => s.items > 0).sort((a, b) => b.items - a.items), [stores])
+  const config = useMemo(() => Object.fromEntries(pieData.map(s => [s.supplier, { label: s.supplier, color: s.fill }])), [pieData])
   const total  = pieData.reduce((acc, s) => acc + s.items, 0)
   const active = pieData[activeIndex] || pieData[0]
- 
   if (loading) return <SkeletonChart height="h-[320px]" />
- 
   return (
     <Card className="flex flex-col">
       <CardHeader className="items-center pb-0">
@@ -325,34 +480,20 @@ function SupplierDonutChart({ summary, loading }) {
         <ChartContainer config={config} className="mx-auto aspect-square max-h-[200px]">
           <PieChart>
             <ChartTooltip content={<ChartTooltipContent nameKey="supplier" hideLabel />} />
-            <Pie
-              data={pieData}
-              dataKey="items"
-              nameKey="supplier"
-              innerRadius={58}
-              outerRadius={85}
-              strokeWidth={3}
-              activeIndex={activeIndex}
-              onMouseEnter={(_, index) => setActiveIndex(index)}
-              activeShape={({ outerRadius = 0, ...props }) => (
-                <Sector {...props} outerRadius={outerRadius + 10} />
-              )}
-            >
-              <Label
-                content={({ viewBox }) => {
-                  if (!viewBox || !('cx' in viewBox)) return null
-                  return (
-                    <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
-                      <tspan x={viewBox.cx} y={(viewBox.cy || 0) - 8} fontSize={22} fontWeight={700} fill="#111">
-                        {active ? Math.round((active.items / total) * 100) : 0}%
-                      </tspan>
-                      <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 12} fontSize={10} fill="#9ca3af">
-                        {active?.supplier}
-                      </tspan>
-                    </text>
-                  )
-                }}
-              />
+            <Pie data={pieData} dataKey="items" nameKey="supplier" innerRadius={58} outerRadius={85} strokeWidth={3}
+              activeIndex={activeIndex} onMouseEnter={(_, index) => setActiveIndex(index)}
+              activeShape={({ outerRadius = 0, ...props }) => <Sector {...props} outerRadius={outerRadius + 10} />}>
+              <Label content={({ viewBox }) => {
+                if (!viewBox || !('cx' in viewBox)) return null
+                return (
+                  <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle" dominantBaseline="middle">
+                    <tspan x={viewBox.cx} y={(viewBox.cy || 0) - 8} fontSize={22} fontWeight={700} fill="#111">
+                      {active ? Math.round((active.items / total) * 100) : 0}%
+                    </tspan>
+                    <tspan x={viewBox.cx} y={(viewBox.cy || 0) + 12} fontSize={10} fill="#9ca3af">{active?.supplier}</tspan>
+                  </text>
+                )
+              }} />
             </Pie>
           </PieChart>
         </ChartContainer>
@@ -367,9 +508,7 @@ function SupplierDonutChart({ summary, loading }) {
               </div>
               <div className="flex items-center gap-2">
                 <span className="font-medium">{fmt(s.items)}</span>
-                <span className="text-muted-foreground/60 text-[10px] w-7 text-right">
-                  {total > 0 ? Math.round((s.items / total) * 100) : 0}%
-                </span>
+                <span className="text-muted-foreground/60 text-[10px] w-7 text-right">{total > 0 ? Math.round((s.items / total) * 100) : 0}%</span>
               </div>
             </div>
           ))}
@@ -380,96 +519,157 @@ function SupplierDonutChart({ summary, loading }) {
           {active?.supplier} leads with {fmt(active?.items)} items
           <TrendingUp className="h-3 w-3" style={{ color: RED }} />
         </div>
-        <div className="leading-none text-muted-foreground text-xs">
-          {fmt(total)} total items tracked
-        </div>
+        <div className="leading-none text-muted-foreground text-xs">{fmt(total)} total items tracked</div>
       </CardFooter>
     </Card>
   )
 }
 
-// ─── Stat row inside store card ───────────────────────────────────────────────
-function StatRow({ items }) {
-  const cells = [...items]
-  while (cells.length < 3) cells.push({ label: '', val: '' })
-  return (
-    <div className="flex border-border pt-5">
-      {cells.map((item, i) => {
-        const hasContent  = !!item.label
-        const prevContent = i > 0 && !!cells[i - 1].label
-        return (
-          <div key={i} className={`flex-1 min-w-0
-            ${hasContent && prevContent ? 'border-l border-border pl-4' : ''}
-            ${hasContent && i < 2 && cells[i + 1]?.label ? 'pr-4' : ''}`}>
-            {hasContent && <>
-              <p className="text-[9px] font-semibold uppercase tracking-widest text-muted-foreground mb-2 truncate">{item.label}</p>
-              <p className="text-xl font-bold text-foreground leading-none">{item.val}</p>
-            </>}
-          </div>
-        )
-      })}
-    </div>
+// ─── Export section ───────────────────────────────────────────────────────────
+const EXPORT_GROUPS = [
+  {
+    title: 'eBay Listings',
+    headerText: 'text-blue-700',
+    exports: [
+      { id: 'ebay-active',           label: 'eBay All Active',         icon: Package,      iconColor: 'text-blue-500',   url: `${BASE_URL}/api/export/ebay-active`,                      filename: 'ebay_all_active.csv' },
+      { id: 'ebay-oos',              label: 'eBay All OOS',            icon: PackageX,     iconColor: 'text-red-500',    url: `${BASE_URL}/api/export/ebay-oos`,                         filename: 'ebay_all_oos.csv' },
+      { id: 'ebay-active-no-autods', label: 'Active — No AutoDS',      icon: ZapOff,       iconColor: 'text-orange-500', url: `${BASE_URL}/api/sync/export-csv?status=active_no_autods`, filename: 'active_no_autods.csv' },
+      { id: 'ebay-dead-no-autods',   label: 'OOS — No AutoDS',         icon: ListX,        iconColor: 'text-rose-500',   url: `${BASE_URL}/api/sync/export-csv?status=dead_no_autods`,   filename: 'oos_no_autods.csv' },
+      { id: 'ebay-no-autods',        label: 'eBay Not in AutoDS',      icon: AlertCircle,  iconColor: 'text-amber-500',  url: `${BASE_URL}/api/export/ebay-no-autods`,                   filename: 'ebay_not_in_autods.csv' },
+    ],
+  },
+  {
+    title: 'AutoDS',
+    headerText: 'text-green-700',
+    exports: [
+      { id: 'autods-matched',    label: 'AutoDS Matched',       icon: CheckCircle2, iconColor: 'text-green-600',  url: `${BASE_URL}/api/export/autods-matched`,    filename: 'autods_active_matched.csv' },
+      { id: 'autods-all',        label: 'AutoDS All',           icon: Package,      iconColor: 'text-teal-500',   url: `${BASE_URL}/api/export/autods-all`,         filename: 'autods_all.csv' },
+      { id: 'autods-not-ebay',   label: 'AutoDS Not on eBay',   icon: Clock,        iconColor: 'text-purple-500', url: `${BASE_URL}/api/export/autods-not-ebay`,    filename: 'autods_not_on_ebay.csv' },
+      { id: 'not-updating-azdp', label: 'Not Updating (AZDP)',  icon: Zap,          iconColor: 'text-yellow-500', url: `${BASE_URL}/api/export/not-updating-azdp`,  filename: 'not_updating_azdp.csv' },
+      { id: 'autods-oos',        label: 'AutoDS OOS',           icon: PackageX,     iconColor: 'text-red-500',    url: `${BASE_URL}/api/export/autods-oos`,         filename: 'autods_oos.csv' },
+    ],
+  },
+  {
+    title: 'Supplier Inventory',
+    headerText: 'text-purple-700',
+    exports: [
+      { id: 'all-paired',         label: 'All Paired Listings',     icon: PackageCheck, iconColor: 'text-green-600',  url: `${BASE_URL}/api/sync/export-csv?status=matched`, filename: 'all_paired.csv' },
+      { id: 'nonamazon-unlisted', label: 'Non-Amazon Never Listed', icon: TrendingUp,   iconColor: 'text-purple-500', url: `${BASE_URL}/api/export/nonamazon-unlisted`,       filename: 'nonamazon_never_listed.csv', slow: true, hintText: '~81k rows' },
+    ],
+  },
+]
+
+function ExportSection({ summary, loading }) {
+  const [downloading, setDownloading] = useState({})
+  const [errors,      setErrors]      = useState({})
+  const [counts,      setCounts]      = useState({})
+
+  useEffect(() => {
+    fetch(`${BASE_URL}/api/export/counts`)
+      .then(r => r.json())
+      .then(d => { if (!d.error) setCounts(d) })
+      .catch(() => {})
+  }, [])
+
+  async function handleDownload(exp) {
+    setDownloading(d => ({ ...d, [exp.id]: true }))
+    setErrors(e => ({ ...e, [exp.id]: null }))
+    try {
+      const resp = await fetch(exp.url)
+      if (!resp.ok) throw new Error(`${resp.status}`)
+      const blob = await resp.blob()
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href = url; a.download = exp.filename
+      document.body.appendChild(a); a.click()
+      document.body.removeChild(a); URL.revokeObjectURL(url)
+    } catch (err) {
+      setErrors(e => ({ ...e, [exp.id]: err.message }))
+    } finally {
+      setDownloading(d => ({ ...d, [exp.id]: false }))
+    }
+  }
+
+  if (loading) return (
+    <Card className="animate-pulse">
+      <CardContent className="py-3 px-4">
+        <div className="h-24 bg-muted/40 rounded-lg" />
+      </CardContent>
+    </Card>
   )
-}
-
-// ─── Store card ───────────────────────────────────────────────────────────────
-function StoreCard({ store, onSelect }) {
-  const total  = Number(store.total_items     || 0)
-  const active = Number(store.active_listings || 0)
-  const oos    = Number(store.out_of_stock    || 0)
-
-  const activeSuppliers = SUPPLIERS
-    .filter(s => Number(store[s.key] || 0) > 0)
-    .map(s => ({ label: s.label, val: fmt(Number(store[s.key])) }))
-
-  const supChunks = chunkArray(activeSuppliers, 3)
 
   return (
-    <button
-      onClick={() => onSelect(store.store_name)}
-      className="text-left bg-card border border-black/70 rounded-2xl p-7 w-full shadow-sm transition-all duration-300 ease-out hover:shadow-[0_12px_30px_rgba(0,0,0,0.18)] hover:-translate-y-1 hover:cursor-pointer"
-    >
-      <h3 className="text-2xl font-black text-foreground mb-1 capitalize leading-tight">
-        {store.store_name}
-      </h3>
-      {store.last_updated && (
-        <p className="text-[10px] text-muted-foreground mb-3">
-          Updated {timeAgo(store.last_updated)}
-        </p>
-      )}
-      <StatRow items={[
-        { label: 'All Items',    val: fmt(total)  },
-        { label: 'Active',       val: fmt(active) },
-        { label: 'Out of Stock', val: fmt(oos)    },
-      ]} />
-      {supChunks.map((chunk, i) => <StatRow key={i} items={chunk} />)}
-    </button>
+    <Card>
+      <CardContent className="p-0">
+        <div className="grid grid-cols-3 divide-x divide-border">
+          {EXPORT_GROUPS.map(group => (
+            <div key={group.title} className="px-3 py-2">
+              <p className={`text-[9px] font-bold uppercase tracking-widest mb-1 ${group.headerText}`}>
+                {group.title}
+              </p>
+              <div className="grid grid-cols-2 gap-x-1 gap-y-0">
+                {group.exports.map(exp => {
+                  const Icon      = exp.icon
+                  const isLoading = downloading[exp.id]
+                  const hasError  = errors[exp.id]
+                  const countVal  = counts[exp.id] !== undefined
+                    ? Number(counts[exp.id])
+                    : exp.summaryKey ? Number(summary?.[exp.summaryKey] || 0) : null
+                  const count = exp.hintText || (countVal !== null && countVal > 0 ? fmt(countVal) : null)
+
+                  return (
+                    <button key={exp.id} onClick={() => handleDownload(exp)} disabled={isLoading}
+                      title={exp.desc + (exp.slow ? ' (~20s)' : '')}
+                      className={`flex items-center justify-between gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium transition-all w-full group
+                        ${hasError ? 'bg-red-50 text-red-600' : isLoading ? 'opacity-50 cursor-not-allowed text-muted-foreground' : 'hover:bg-muted text-foreground'}`}>
+                      <div className="flex items-center gap-1 min-w-0">
+                        {isLoading ? (
+                          <svg className="animate-spin h-2.5 w-2.5 flex-shrink-0" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
+                          </svg>
+                        ) : (
+                          <Icon size={10} className={`flex-shrink-0 ${exp.iconColor}`} />
+                        )}
+                        <span className="truncate text-[11px]">{exp.label}</span>
+                      </div>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        {count && !isLoading && (
+                          <span className="text-muted-foreground tabular-nums text-[10px] font-normal">{count}</span>
+                        )}
+                        {hasError
+                          ? <span className="text-red-500 text-[10px]">✕</span>
+                          : <Download size={9} className="text-muted-foreground/40 group-hover:text-muted-foreground transition-colors" />}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
 // ─── Filter bar ───────────────────────────────────────────────────────────────
-function StoreFilterBar({ search, onSearch, supplierFilter, onSupplierFilter, stockFilter, onStockFilter, resultCount, totalCount }) {
+function FilterBar({ search, onSearch, supplierFilter, onSupplierFilter, stockFilter, onStockFilter, resultCount, totalCount }) {
   const hasFilters = search || supplierFilter || stockFilter
   return (
     <div className="flex flex-wrap items-center gap-3">
       <div className="relative flex-1 min-w-[200px] max-w-xs">
         <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-        <input type="text" value={search} onChange={e => onSearch(e.target.value)}
-          placeholder="Search stores…"
-          className="w-full pl-8 pr-8 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent placeholder:text-muted-foreground/60 transition-all"
-        />
-        {search && (
-          <button onClick={() => onSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors">
-            <X size={12} />
-          </button>
-        )}
+        <input type="text" value={search} onChange={e => onSearch(e.target.value)} placeholder="Search stores…"
+          className="w-full pl-8 pr-8 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground/60 transition-all" />
+        {search && <button onClick={() => onSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"><X size={12} /></button>}
       </div>
       <div className="relative">
         <SlidersHorizontal size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
         <select value={supplierFilter} onChange={e => onSupplierFilter(e.target.value)}
           className="pl-8 pr-7 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground transition-all">
           <option value="">All Suppliers</option>
-          {SUPPLIERS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+          {SUPPLIERS_DEF.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
         </select>
       </div>
       <select value={stockFilter} onChange={e => onStockFilter(e.target.value)}
@@ -492,103 +692,144 @@ function StoreFilterBar({ search, onSearch, supplierFilter, onSupplierFilter, st
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
-export default function EbayTab() {
-  const [summary,       setSummary]       = useState(SUMMARY_CACHE.data || [])
-  const [loading,       setLoading]       = useState(!SUMMARY_CACHE.data)
-  const [selectedStore, setSelectedStore] = useState(null)
-
+export default function StoresTab() {
+  const [stores,         setStores]         = useState(STORES_CACHE.data  || [])
+  const [summary,        setSummary]        = useState(SUMMARY_CACHE.data || null)
+  const [suppliers,      setSuppliers]      = useState(SUPPLIER_CACHE.data || null)
+  const [loading,        setLoading]        = useState(!STORES_CACHE.data)
+  const [lastSynced,     setLastSynced]     = useState({ ebay: null, autods: null })
+  const [selectedStore,  setSelectedStore]  = useState(null)
+  const [showBanned,     setShowBanned]     = useState(false)
+  const [bannedStore,    setBannedStore]    = useState(null)
+  const [bannedTotal,    setBannedTotal]    = useState(0)
+  const [bannedOnEbay,   setBannedOnEbay]   = useState(0)
   const [search,         setSearch]         = useState('')
   const [supplierFilter, setSupplierFilter] = useState('')
   const [stockFilter,    setStockFilter]    = useState('')
 
   useEffect(() => {
     async function load() {
-      if (SUMMARY_CACHE.data && Date.now() - SUMMARY_CACHE.ts < STALE_MS) return
-      if (!SUMMARY_CACHE.data) setLoading(true)
-      const data = await api.get('/api/ebay/summary')
-      if (Array.isArray(data)) {
-        setSummary(data)
-        SUMMARY_CACHE.data = data
-        SUMMARY_CACHE.ts   = Date.now()
-      }
+      // Always fetch last-synced and banned count regardless of cache
+      const [syncedData, countData] = await Promise.all([
+        api.get('/api/sync/last-synced'),
+        api.get('/api/banned-skus/count'),
+      ])
+      if (syncedData) setLastSynced(syncedData)
+      if (countData)  { setBannedTotal(countData.total); setBannedOnEbay(countData.on_ebay) }
+
+      if (STORES_CACHE.data && Date.now() - STORES_CACHE.ts < STALE_MS) return
+      if (!STORES_CACHE.data) setLoading(true)
+
+      const [storeData, sumData, supData] = await Promise.all([
+        api.get('/api/stores/combined'),
+        api.get('/api/stores/summary'),
+        api.get('/api/stores/suppliers'),
+      ])
+      if (Array.isArray(storeData))           { setStores(storeData);  STORES_CACHE.data   = storeData; STORES_CACHE.ts   = Date.now() }
+      if (sumData && !Array.isArray(sumData)) { setSummary(sumData);   SUMMARY_CACHE.data  = sumData;   SUMMARY_CACHE.ts  = Date.now() }
+      if (supData && !Array.isArray(supData)) { setSuppliers(supData); SUPPLIER_CACHE.data = supData;   SUPPLIER_CACHE.ts = Date.now() }
       setLoading(false)
     }
     load()
   }, [])
 
-  const filteredSummary = useMemo(() => {
-    return summary.filter(store => {
-      if (search && !store.store_name.toLowerCase().includes(search.toLowerCase())) return false
-      if (supplierFilter && Number(store[supplierFilter] || 0) === 0) return false
-      if (stockFilter === 'in'  && Number(store.active_listings || 0) === 0) return false
-      if (stockFilter === 'out' && Number(store.out_of_stock    || 0) === 0) return false
-      return true
-    })
-  }, [summary, search, supplierFilter, stockFilter])
+  const filteredStores = useMemo(() => stores.filter(store => {
+    if (search && !store.store_name.toLowerCase().includes(search.toLowerCase())) return false
+    if (supplierFilter && Number(store[supplierFilter] || 0) === 0) return false
+    if (stockFilter === 'in'  && Number(store.active_listings || 0) === 0) return false
+    if (stockFilter === 'out' && Number(store.out_of_stock    || 0) === 0) return false
+    return true
+  }), [stores, search, supplierFilter, stockFilter])
 
-  const totals = useMemo(() => summary.reduce((acc, s) => ({
-    total_items:     (acc.total_items     || 0) + Number(s.total_items     || 0),
-    active_listings: (acc.active_listings || 0) + Number(s.active_listings || 0),
-    out_of_stock:    (acc.out_of_stock    || 0) + Number(s.out_of_stock    || 0),
-  }), {}), [summary])
+  // eBay numbers
+  const totalListings = Number(summary?.total_listings || 0)
+  const totalActive   = Number(summary?.total_active   || 0)
+  const totalOos      = Number(summary?.total_oos       || 0)
+  const storeCount    = stores.length
 
-  const globalLastUpdated = useMemo(() => summary.reduce((latest, s) =>
-    !latest || new Date(s.last_updated) > new Date(latest) ? s.last_updated : latest
-  , null), [summary])
+  // Amazon/AutoDS numbers
+  const amazonTotal  = Number(summary?.ebay_total_amazon || 0)
+  const autodsTotal  = Number(summary?.autods_total       || 0)
+  const paired       = Number(summary?.paired             || 0)
+  const notUpdating  = Number(summary?.not_updating       || 0) + Number(summary?.not_updating_azdp || 0)
+  const pairedPct    = pct(paired, amazonTotal)
 
-  const noData    = !loading && summary.length === 0
-  const storeCols = filteredSummary.length === 1 ? 1 : filteredSummary.length >= 5 ? 3 : 2
+  const noData    = !loading && stores.length === 0
+  const storeCols = filteredStores.length === 1 ? 1 : filteredStores.length >= 5 ? 3 : 2
 
-  if (selectedStore) {
-    return <StoreListingsPage storeName={selectedStore} onBack={() => setSelectedStore(null)} />
-  }
+  // ── Page-level navigation guards (must be after all hooks) ──
+  if (selectedStore) return <StoreListingsPage storeName={selectedStore} onBack={() => setSelectedStore(null)} />
+  if (showBanned)    return <BannedSkusPage initialStore={bannedStore} onBack={() => { setShowBanned(false); setBannedStore(null); STORES_CACHE.ts = 0 }} />
 
   return (
     <div className="p-6 space-y-6">
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <SummaryCard label="Total Listings"  value={totals.total_items}
-          trendPct={null} trendLabel="total this period" subLabel="All eBay store listings" loading={loading} />
-        <SummaryCard label="Active Listings" value={totals.active_listings}
-          trendPct={null} trendLabel="active this period" subLabel="Currently in stock & live" loading={loading} />
-        <SummaryCard label="Out of Stock"    value={totals.out_of_stock}
-          trendPct={null} trendLabel="out of stock items" subLabel="Needs restocking attention" loading={loading} />
-        <SummaryCard label="Stores"          value={summary.length}
-          trendPct={null} trendLabel="connected stores" subLabel="eBay seller accounts tracked" loading={loading} />
+      {/* ── Combined summary ── */}
+      <div>
+        <p className="text-xs text-muted-foreground font-medium mb-3">
+          eBay Overview <span className="opacity-50">— all suppliers</span>
+          {!loading && (
+            <>
+              {lastSynced.ebay && (
+                <span className="ml-2 opacity-60">· eBay synced {timeAgo(lastSynced.ebay)}</span>
+              )}
+              {lastSynced.autods && (
+                <span className="ml-2 opacity-60">· AutoDS synced {timeAgo(lastSynced.autods)}</span>
+              )}
+            </>
+          )}
+        </p>
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-9 gap-4">
+          <SummaryCard label="Total Listings"    value={totalListings} trendLabel="total this period"           subLabel="All eBay store listings"      loading={loading} compact />
+          <SummaryCard label="Active Listings"   value={totalActive}   trendLabel="active this period"          subLabel="Currently in stock & live"     loading={loading} compact />
+          <SummaryCard label="Out of Stock"      value={totalOos}      trendLabel="out of stock items"          subLabel="Needs restocking attention"    loading={loading} compact />
+          <SummaryCard label="Stores"            value={storeCount}    trendLabel="connected stores"            subLabel="eBay seller accounts tracked"  loading={loading} compact />
+          <SummaryCard label="Amazon on eBay"    value={amazonTotal}   trendLabel="Amazon SKUs on eBay"         subLabel="A-prefix and AZDP listings"    loading={loading} compact />
+          <SummaryCard label="AutoDS Products"   value={autodsTotal}   trendLabel="ASINs monitored"             subLabel="In AutoDS monitoring"          loading={loading} compact />
+          <SummaryCard label="eBay + AutoDS"     value={paired}        trendLabel={`${pairedPct}% pair rate`}   subLabel="Amazon listings monitored"     accent="#22c55e"  loading={loading} compact />
+          <SummaryCard label="Not Updating"      value={notUpdating}   trendLabel="need to be updated"          subLabel="No AutoDS monitoring"          accent="#ef4444"  loading={loading} compact />
+          {/* ── Banned SKUs card — clickable ── */}
+          <div onClick={() => setShowBanned(true)} className="cursor-pointer">
+            <SummaryCard
+              label="Banned on eBay"
+              value={bannedOnEbay}
+              trendLabel={`${bannedTotal} banned SKUs`}
+              subLabel="Needs immediate removal"
+              accent={bannedOnEbay > 0 ? '#ef4444' : '#22c55e'}
+              loading={loading}
+              compact
+            />
+          </div>
+        </div>
       </div>
 
-      {/* Global last synced */}
-      {!loading && globalLastUpdated && (
-        <p className="text-xs text-muted-foreground -mt-4">
-          Last synced: {timeAgo(globalLastUpdated)}
-        </p>
-      )}
-
-      {/* Main layout */}
+      {/* ── Main layout ── */}
       <div className="grid grid-cols-1 xl:grid-cols-[1fr_300px] gap-6 items-start">
 
-        {/* Left: charts + stores */}
+        {/* LEFT */}
         <div className="space-y-6">
 
-          {/* Charts row */}
+          {/* Charts */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <TopStoresChart summary={summary} loading={loading} />
-            <OutOfStockChart summary={summary} loading={loading} />
+            <TopStoresChart  stores={stores} loading={loading} />
+            <OutOfStockChart stores={stores} loading={loading} />
           </div>
 
-          {/* Stores */}
+          {/* Exports */}
+          <ExportSection summary={summary} loading={loading} />
+
+          {/* Store cards */}
           <div className="space-y-4">
             <div className="space-y-3">
               <p className="text-xs text-muted-foreground font-medium">
-                Stores <span className="opacity-50">({summary.length})</span>
+                Stores <span className="opacity-50">({stores.length})</span>
               </p>
-              {!loading && summary.length > 0 && (
-                <StoreFilterBar
+              {!loading && stores.length > 0 && (
+                <FilterBar
                   search={search} onSearch={setSearch}
                   supplierFilter={supplierFilter} onSupplierFilter={setSupplierFilter}
                   stockFilter={stockFilter} onStockFilter={setStockFilter}
-                  resultCount={filteredSummary.length} totalCount={summary.length}
+                  resultCount={filteredStores.length} totalCount={stores.length}
                 />
               )}
             </div>
@@ -603,7 +844,7 @@ export default function EbayTab() {
                 <p className="text-sm text-muted-foreground font-medium">No store data yet</p>
                 <p className="text-xs text-muted-foreground/60">Run the Python script to push your first snapshot</p>
               </div>
-            ) : filteredSummary.length === 0 ? (
+            ) : filteredStores.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 gap-3">
                 <Search size={28} className="text-muted-foreground/30" />
                 <p className="text-sm text-muted-foreground font-medium">No stores match your filters</p>
@@ -614,22 +855,32 @@ export default function EbayTab() {
               </div>
             ) : (
               <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${storeCols}, minmax(0, 1fr))` }}>
-                {filteredSummary.map(store => (
-                  <StoreCard key={store.store_name} store={store} onSelect={setSelectedStore} />
+                {filteredStores.map(store => (
+                  <StoreCard
+                    key={store.store_name}
+                    store={store}
+                    onSelect={name => {
+                      const s = stores.find(x => x.store_name === name)
+                      if (s && Number(s.banned_count || 0) > 0) {
+                        setBannedStore(name)
+                        setShowBanned(true)
+                      } else {
+                        setSelectedStore(name)
+                      }
+                    }}
+                  />
                 ))}
               </div>
             )}
           </div>
         </div>
 
-        {/* Right sidebar */}
+        {/* RIGHT SIDEBAR */}
         <div className="xl:sticky xl:top-6 space-y-4">
-          <ActiveRateRadial
-            total={totals.total_items || 0}
-            active={totals.active_listings || 0}
-            loading={loading}
-          />
-          <SupplierDonutChart summary={summary} loading={loading} />
+          <ActiveRateRadial   summary={summary} loading={loading} />
+          <PairRateRadial     summary={summary} loading={loading} />
+          <SyncStatusCard     summary={summary} loading={loading} />
+          <SupplierDonutChart stores={stores}   loading={loading} />
         </div>
       </div>
     </div>

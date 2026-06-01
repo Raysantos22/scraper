@@ -1,9 +1,8 @@
 // C:\Users\ADMIN\scraper\src\pages\Dashboard.jsx
 import { useState } from 'react'
-import { LogOut, Package, ShoppingBag, RefreshCw } from 'lucide-react'
+import { LogOut, Package, ShoppingBag } from 'lucide-react'
 import ProductsTab from './products/ProductsTab'
-import EbayTab from './ebay/EbayTab'
-import SyncTab from './sync/SyncTab'
+import StoresTab from './ebay/EbayTab'
 
 export default function Dashboard({ session, onLogout }) {
   const [activeTab, setActiveTab] = useState('products')
@@ -15,14 +14,11 @@ export default function Dashboard({ session, onLogout }) {
 
   const tabs = [
     { id: 'products', label: 'Products', icon: Package },
-    { id: 'ebay',     label: 'Stores',   icon: ShoppingBag },
-    { id: 'sync',     label: 'Sync',     icon: RefreshCw },
+    { id: 'stores',   label: 'Stores',   icon: ShoppingBag },
   ]
 
   return (
     <div className="flex h-screen bg-white font-sans text-sm overflow-hidden">
-
-      {/* Sidebar */}
       <aside className="w-52 border-r border-gray-100 flex flex-col flex-shrink-0 py-4">
         <div className="px-4 mb-6 flex items-center gap-2">
           <div className="w-6 h-6 rounded-full border-2 border-gray-800 flex items-center justify-center">
@@ -30,7 +26,6 @@ export default function Dashboard({ session, onLogout }) {
           </div>
           <span className="font-semibold text-gray-900 text-sm">Scraper</span>
         </div>
-
         <div className="px-3 mb-1">
           <p className="text-xs text-gray-400 px-2 mb-1 font-medium">Inventory</p>
           {tabs.map(({ id, label, icon: Icon }) => (
@@ -45,7 +40,6 @@ export default function Dashboard({ session, onLogout }) {
             </button>
           ))}
         </div>
-
         <div className="mt-auto px-3 border-t border-gray-100 pt-3">
           <div className="px-2 py-1.5 mb-2">
             <p className="text-xs text-gray-500 font-medium truncate">{session?.email}</p>
@@ -56,8 +50,6 @@ export default function Dashboard({ session, onLogout }) {
           </button>
         </div>
       </aside>
-
-      {/* Main */}
       <div className="flex-1 flex flex-col overflow-hidden">
         <header className="border-b border-gray-100 px-6 py-3 flex items-center justify-between">
           <h1 className="text-base font-semibold text-gray-900">
@@ -66,8 +58,7 @@ export default function Dashboard({ session, onLogout }) {
         </header>
         <main className="flex-1 overflow-auto">
           {activeTab === 'products' && <ProductsTab />}
-          {activeTab === 'ebay'     && <EbayTab />}
-          {activeTab === 'sync'     && <SyncTab />}
+          {activeTab === 'stores'   && <StoresTab />}
         </main>
       </div>
     </div>
