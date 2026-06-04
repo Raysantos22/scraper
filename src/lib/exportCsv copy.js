@@ -36,6 +36,9 @@ export async function exportProductsCsv({
   // 2. Fetch all override SKUs
   const allSkus = allProducts.map(p => p.sku)
   let overridesBySku = {}
+  // Fetch overrides one by one for matching SKUs (batched via separate endpoint if needed)
+  // For export we use override-skus list we already have, and fetch individually only if needed
+  // Simple approach: fetch all overrides via product-overrides endpoint per SKU
   await Promise.all(
     allSkus.map(async sku => {
       try {
@@ -46,9 +49,7 @@ export async function exportProductsCsv({
   )
 
   // 3. Fetch variants for variation_parent products
-  const parentIds = allProducts
-    .filter(p => p.product_type === 'variation_parent')
-    .map(p => p.product_id)
+  const parentIds = allProducts.filter(p => p.product_type === 'variation_parent').map(p => p.product_id)
   let variantsByParent = {}
   await Promise.all(
     parentIds.map(async id => {
@@ -66,10 +67,10 @@ export async function exportProductsCsv({
     return []
   }
 
-  // 5. Merge overrides (title, description, images)
+  // 5. Merge overrides
   const mergedProducts = allProducts.map(p => {
     const ov = overridesBySku[p.sku]
-    if (!ov) return { ...p }  // always spread so we can safely add fields
+    if (!ov) return p
     return {
       ...p,
       title:       ov.title       ?? p.title,
@@ -86,19 +87,7 @@ export async function exportProductsCsv({
     'option3_name', 'option3_value',
   ]
   const extraHeaders = variantOnlyFields.filter(f => !productHeaders.includes(f))
-
-  // Ensure description is always present in headers even if API doesn't return it
-  const ensuredFields = ['description']
-  const ensuredExtras = ensuredFields.filter(f =>
-    !productHeaders.includes(f) && !extraHeaders.includes(f)
-  )
-
-  const allHeaders = [
-    ...productHeaders,
-    ...extraHeaders,
-    ...ensuredExtras,
-    'has_override', 'row_type', 'parent_product_id',
-  ]
+  const allHeaders = [...productHeaders, ...extraHeaders, 'has_override', 'row_type', 'parent_product_id']
 
   // 7. CSV escape helper
   const esc = v => {
@@ -106,9 +95,7 @@ export async function exportProductsCsv({
     else if (typeof v === 'object' && v !== null) v = JSON.stringify(v)
     let s = v == null ? '' : String(v)
     s = s.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()
-    return s.includes(',') || s.includes('"') || s.includes('\n')
-      ? `"${s.replace(/"/g, '""')}"`
-      : s
+    return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s.replace(/"/g, '""')}"` : s
   }
 
   // 8. Build rows
@@ -117,19 +104,16 @@ export async function exportProductsCsv({
     const isParent    = product.product_type === 'variation_parent'
     const hasOverride = !!overridesBySku[product.sku]
 
-    // Parent / standalone row
     const parentRow = allHeaders.map(h => {
       if (h === 'row_type')          return esc(isParent ? 'variation_parent' : 'standalone')
       if (h === 'parent_product_id') return ''
       if (h === 'has_override')      return esc(hasOverride ? 'yes' : 'no')
       if (h === 'images')            return esc(safeParseImages(product.images))
-      if (h === 'description')       return esc(product.description ?? '')
-      if (extraHeaders.includes(h) || ensuredExtras.includes(h)) return ''
+      if (extraHeaders.includes(h))  return ''
       return esc(product[h])
     })
     rows.push(parentRow)
 
-    // Variant child rows
     if (isParent && variantsByParent[product.product_id]) {
       for (const v of variantsByParent[product.product_id]) {
         const childRow = allHeaders.map(h => {
@@ -141,12 +125,8 @@ export async function exportProductsCsv({
           if (h === 'title')             return esc(v.variant_name)
           if (h === 'price')             return esc(v.price)
           if (h === 'stock')             return esc(v.stock)
-          if (h === 'images')            return esc(
-            safeParseImages(v.images).length
-              ? safeParseImages(v.images)
-              : safeParseImages(product.images)
-          )
-          if (h === 'description')       return esc(product.description ?? '')
+          if (h === 'images')            return esc(safeParseImages(v.images).length ? safeParseImages(v.images) : safeParseImages(product.images))
+          if (h === 'description')       return esc(product.description)
           if (h === 'created_at')        return esc(v.created_at)
           if (h === 'updated_at')        return esc(v.updated_at)
           if (h === 'metadata')          return esc(v.metadata)
@@ -171,7 +151,7 @@ export async function exportProductsCsv({
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
   const url  = URL.createObjectURL(blob)
   const a    = document.createElement('a')
-  a.href     = url
+  a.href = url
   a.download = `products_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.csv`
   document.body.appendChild(a); a.click()
   document.body.removeChild(a); URL.revokeObjectURL(url)

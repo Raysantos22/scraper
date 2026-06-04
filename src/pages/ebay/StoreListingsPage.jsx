@@ -65,6 +65,12 @@ const ListingRow = React.memo(function ListingRow({ listing }) {
         )}
       </td>
       <td className="px-4 py-3">
+        <p className="font-mono text-xs text-gray-500 truncate">{listing.origin_sku || '—'}</p>
+      </td>
+      <td className="px-4 py-3">
+        <p className="font-mono text-xs text-gray-500 truncate">{listing.autods_id || '—'}</p>
+      </td>
+      <td className="px-4 py-3">
         {listing.item_id ? (
           <a href={`https://www.ebay.com.au/itm/${listing.item_id}`} target="_blank" rel="noopener noreferrer"
             onClick={e => e.stopPropagation()}
@@ -78,6 +84,7 @@ const ListingRow = React.memo(function ListingRow({ listing }) {
         <span className="text-sm font-semibold text-gray-900">${parseFloat(listing.price || 0).toFixed(2)}</span>
       </td>
       <td className="px-4 py-3"><QtyBadge qty={listing.quantity} /></td>
+      <td className="px-4 py-3 text-xs text-gray-400">{fmtDate(listing.oos_since)}</td>
       <td className="px-4 py-3 text-xs text-gray-400">{fmtDate(listing.snapshot_date)}</td>
     </tr>
   )
@@ -249,7 +256,7 @@ export default function StoreListingsPage({ storeName, onBack }) {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50">
-                  {['SKU', 'Item ID', 'Price', 'Status', 'Snapshot'].map(h => (
+                  {['SKU', 'Origin SKU', 'AutoDS ID', 'Item ID', 'Price', 'Status', 'OOS Since', 'Snapshot'].map(h => (
                     <th key={h} className="text-left px-4 py-3 text-xs text-gray-400 font-medium">{h}</th>
                   ))}
                 </tr>
@@ -284,13 +291,15 @@ export default function StoreListingsPage({ storeName, onBack }) {
           <div className="border border-gray-100 rounded-xl overflow-hidden">
             <table className="w-full text-xs table-fixed">
               <colgroup>
-                <col style={{ width: '30%' }} /><col style={{ width: '20%' }} />
-                <col style={{ width: '12%' }} /><col style={{ width: '20%' }} />
-                <col style={{ width: '18%' }} />
+                <col style={{ width: '18%' }} /><col style={{ width: '12%' }} />
+                <col style={{ width: '14%' }} /><col style={{ width: '14%' }} />
+                <col style={{ width: '10%' }} /><col style={{ width: '12%' }} />
+                <col style={{ width: '10%' }} /><col style={{ width: '10%' }} />
               </colgroup>
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50">
-                  {['SKU', 'Item ID', 'Price', 'Status', 'Snapshot'].map(h => (
+                  {['SKU', 'Origin SKU', 'AutoDS ID', 'Item ID', 'Price', 'Status', 'OOS Since', 'Snapshot'].map(h => (
+
                     <th key={h} className="text-left px-4 py-3 text-xs text-gray-400 font-medium">{h}</th>
                   ))}
                 </tr>
