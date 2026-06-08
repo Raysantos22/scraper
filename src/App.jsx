@@ -3,9 +3,9 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { useState } from 'react'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
+import ChecklistTab from './pages/checklist/ChecklistTab'
 
 export default function App() {
-  // Check localStorage for existing session on load
   const [session, setSession] = useState(() => {
     try {
       const stored = localStorage.getItem('scraper_session')
@@ -32,6 +32,10 @@ export default function App() {
       <Route
         path="/dashboard"
         element={session ? <Dashboard session={session} onLogout={handleLogout} /> : <Navigate to="/login" replace />}
+      />
+      <Route
+        path="/checklist"
+        element={<ChecklistTab />}
       />
       <Route
         path="*"

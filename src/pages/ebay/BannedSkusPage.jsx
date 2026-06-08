@@ -1,9 +1,10 @@
 // C:\Users\ADMIN\scraper\src\pages\ebay\BannedSkusPage.jsx
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { api } from '../../lib/api'
 import {
   AlertTriangle, Plus, Trash2, Download, RefreshCw,
-  ArrowLeft, ShieldAlert, ShieldCheck, Search, X,
+  ArrowLeft, ShieldAlert, ShieldCheck, Search, X, Upload, FileDown,
+  CheckCircle2, XCircle, SkipForward,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 
@@ -27,17 +28,22 @@ function timeAgo(dateStr) {
 }
 
 export default function BannedSkusPage({ onBack, initialStore }) {
-  const [banned,      setBanned]      = useState(CACHE.banned || [])
-  const [live,        setLive]        = useState(CACHE.live   || [])
-  const [loading,     setLoading]     = useState(!CACHE.banned)
-  const [search,      setSearch]      = useState(initialStore || '')
-  const [newSku,      setNewSku]      = useState('')
-  const [newReason,   setNewReason]   = useState('')
-  const [adding,      setAdding]      = useState(false)
-  const [deleting,    setDeleting]    = useState({})
-  const [error,       setError]       = useState(null)
-  const [tab,         setTab]         = useState('live')
-  const [downloading, setDownloading] = useState(false)
+  const [banned,         setBanned]         = useState(CACHE.banned || [])
+  const [live,           setLive]           = useState(CACHE.live   || [])
+  const [loading,        setLoading]        = useState(!CACHE.banned)
+  const [search,         setSearch]         = useState(initialStore || '')
+  const [newSku,         setNewSku]         = useState('')
+  const [newReason,      setNewReason]      = useState('')
+  const [adding,         setAdding]         = useState(false)
+  const [deleting,       setDeleting]       = useState({})
+  const [error,          setError]          = useState(null)
+  const [tab,            setTab]            = useState('live')
+  const [downloading,    setDownloading]    = useState(false)
+  const [downloadingAll, setDownloadingAll] = useState(false)
+  const [importing,      setImporting]      = useState(false)
+  const [importResult,   setImportResult]   = useState(null)
+  const [importProgress, setImportProgress] = useState(null) // { done, total, pct }
+  const fileInputRef = useRef(null)
 
   async function loadAll(force = false) {
     if (!force && CACHE.banned && Date.now() - CACHE.ts < STALE_MS) return
@@ -112,6 +118,118 @@ export default function BannedSkusPage({ onBack, initialStore }) {
     }
   }
 
+  async function handleExportAll() {
+    setDownloadingAll(true)
+    try {
+      const resp = await fetch(`${BASE_URL}/api/banned-skus/export-all`)
+      const blob = await resp.blob()
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href = url; a.download = `banned_skus_all_${new Date().toISOString().slice(0,10)}.csv`
+      document.body.appendChild(a); a.click()
+      document.body.removeChild(a); URL.revokeObjectURL(url)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setDownloadingAll(false)
+    }
+  }
+
+  // Download a template CSV with example SKU formats
+  function handleDownloadTemplate() {
+    const rows = [
+      'sku,reason',
+      'CUSTOM1,Optional reason here',
+      'CUSTOM2,Another reason',
+      'ALL_BAN_SKU,Ban everything matching this',
+      'B0ABC12345,Specific Amazon ASIN',
+      'AZDP_99999,AutoDS product ID',
+    ]
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href = url; a.download = 'banned_skus_import_template.csv'
+    document.body.appendChild(a); a.click()
+    document.body.removeChild(a); URL.revokeObjectURL(url)
+  }
+
+  // Parse CSV and bulk-import via single batch endpoint
+  async function handleImportCsv(e) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    e.target.value = ''
+    setError(null)
+    setImportResult(null)
+    setImportProgress(null)
+
+    const text  = await file.text()
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
+    const dataLines = lines[0]?.toLowerCase().startsWith('sku') ? lines.slice(1) : lines
+
+    if (dataLines.length === 0) {
+      setError('CSV has no data rows.')
+      return
+    }
+
+    // Parse all rows upfront
+    const items = []
+    let skipped = 0
+    for (const line of dataLines) {
+      const cols   = line.match(/("(?:[^"]|"")*"|[^,]*)/g) || []
+      const sku    = (cols[0] || '').replace(/^"|"$/g, '').trim().toUpperCase()
+      const reason = (cols[1] || '').replace(/^"|"$/g, '').trim() || 'Bulk import'
+      if (!sku) { skipped++; continue }
+      items.push({ sku, reason })
+    }
+
+    if (items.length === 0) {
+      setError('No valid SKUs found in CSV.')
+      return
+    }
+
+    setImporting(true)
+    setImportProgress({ done: 0, total: items.length, pct: 0 })
+
+    // Send in chunks of 500 — each chunk = 1 bulk SQL insert
+    const CHUNK    = 500
+    let success    = 0
+    let failed     = 0
+    let tooLong    = []
+    const errors   = []
+
+    for (let i = 0; i < items.length; i += CHUNK) {
+      const chunk = items.slice(i, i + CHUNK)
+      try {
+        const resp = await fetch(`${BASE_URL}/api/banned-skus/bulk`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ items: chunk }),
+        })
+        const body = await resp.json().catch(() => ({}))
+        if (resp.ok) {
+          success  += body.inserted ?? chunk.length
+          tooLong   = tooLong.concat(body.too_long || [])
+          skipped  += body.skipped_too_long || 0
+        } else {
+          failed += chunk.length
+          errors.push(`Chunk ${Math.floor(i / CHUNK) + 1}: ${body.error || resp.statusText}`)
+        }
+      } catch (err) {
+        failed += chunk.length
+        errors.push(`Chunk ${Math.floor(i / CHUNK) + 1}: ${err.message}`)
+      }
+
+      const done = Math.min(i + CHUNK, items.length)
+      setImportProgress({ done, total: items.length, pct: Math.round((done / items.length) * 100) })
+    }
+
+    setImportResult({ success, skipped, failed, tooLong, errors, total: dataLines.length })
+    setImportProgress(null)
+    CACHE.ts = 0
+    await loadAll(true)
+    setImporting(false)
+  }
+
   const filteredBanned = banned.filter(b =>
     !search ||
     b.sku.toLowerCase().includes(search.toLowerCase()) ||
@@ -146,6 +264,11 @@ export default function BannedSkusPage({ onBack, initialStore }) {
           <button onClick={() => loadAll(true)} disabled={loading}
             className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground border border-border rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50">
             <RefreshCw size={11} className={loading ? 'animate-spin' : ''} /> Refresh
+          </button>
+          <button onClick={handleExportAll} disabled={downloadingAll || banned.length === 0}
+            className="flex items-center gap-1.5 text-xs bg-foreground hover:opacity-80 text-background rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50">
+            <Download size={11} />
+            {downloadingAll ? 'Downloading…' : 'Export All'}
           </button>
           <button onClick={handleExport} disabled={downloading || live.length === 0}
             className="flex items-center gap-1.5 text-xs bg-red-500 hover:bg-red-600 text-white rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50">
@@ -213,8 +336,9 @@ export default function BannedSkusPage({ onBack, initialStore }) {
 
       {/* Add SKU */}
       <Card>
-        <CardContent className="pt-4 pb-4">
-          <p className="text-xs font-semibold mb-2">Add Banned SKU</p>
+        <CardContent className="pt-4 pb-4 space-y-3">
+          {/* Single add row */}
+          <p className="text-xs font-semibold">Add Banned SKU</p>
           <div className="flex gap-2">
             <input type="text" value={newSku} onChange={e => setNewSku(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleAdd()}
@@ -229,7 +353,90 @@ export default function BannedSkusPage({ onBack, initialStore }) {
               <Plus size={13} />{adding ? 'Adding…' : 'Add'}
             </button>
           </div>
-          {error && <p className="text-xs text-red-500 mt-2">{error}</p>}
+
+          {/* Divider */}
+          <div className="flex items-center gap-2">
+            <div className="flex-1 h-px bg-border" />
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wide">or bulk import via CSV</span>
+            <div className="flex-1 h-px bg-border" />
+          </div>
+
+          {/* CSV import row */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={handleDownloadTemplate}
+              className="flex items-center gap-1.5 text-xs border border-border rounded-lg px-3 py-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors">
+              <FileDown size={12} /> Download Template
+            </button>
+            <span className="text-xs text-muted-foreground">→ fill in SKUs → then</span>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={handleImportCsv}
+              className="hidden"
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={importing}
+              className="flex items-center gap-1.5 text-xs bg-foreground text-background hover:opacity-80 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 font-medium">
+              <Upload size={12} />
+              {importing ? 'Importing…' : 'Import CSV'}
+            </button>
+          </div>
+
+          {/* Progress bar — shown while importing */}
+          {importProgress && (
+            <div className="space-y-1.5">
+              <div className="flex justify-between text-xs text-muted-foreground">
+                <span className="animate-pulse">
+                  Importing… {importProgress.done.toLocaleString()} / {importProgress.total.toLocaleString()} SKUs
+                </span>
+                <span className="font-mono font-semibold">{importProgress.pct}%</span>
+              </div>
+              <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-red-500 rounded-full transition-all duration-300"
+                  style={{ width: `${importProgress.pct}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Import result banner */}
+          {importResult && (
+            <div className="rounded-lg border border-border bg-muted/30 px-3 py-2.5 space-y-1.5">
+              <p className="text-xs font-semibold">
+                Import complete — {importResult.total.toLocaleString()} row{importResult.total !== 1 ? 's' : ''} processed
+              </p>
+              <div className="flex flex-wrap gap-3 text-xs">
+                <span className="flex items-center gap-1 text-green-600">
+                  <CheckCircle2 size={11} /> {importResult.success.toLocaleString()} added
+                </span>
+                <span className="flex items-center gap-1 text-muted-foreground">
+                  <SkipForward size={11} /> {importResult.skipped.toLocaleString()} skipped (blank)
+                </span>
+                {importResult.failed > 0 && (
+                  <span className="flex items-center gap-1 text-red-500">
+                    <XCircle size={11} /> {importResult.failed.toLocaleString()} failed
+                  </span>
+                )}
+              </div>
+              {importResult.errors.length > 0 && (
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-red-500 hover:underline">Show errors</summary>
+                  <ul className="mt-1 space-y-0.5 font-mono text-red-400">
+                    {importResult.errors.map((e, i) => <li key={i}>{e}</li>)}
+                  </ul>
+                </details>
+              )}
+              <button onClick={() => setImportResult(null)}
+                className="text-[10px] text-muted-foreground hover:text-foreground underline">
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {error && <p className="text-xs text-red-500">{error}</p>}
         </CardContent>
       </Card>
 

@@ -1,11 +1,20 @@
 // C:\Users\ADMIN\scraper\src\pages\Dashboard.jsx
-import { useState } from 'react'
-import { LogOut, Package, ShoppingBag } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { LogOut, Package, ShoppingBag, CheckSquare } from 'lucide-react'
 import ProductsTab from './products/ProductsTab'
 import StoresTab from './ebay/EbayTab'
+import ChecklistTab from './checklist/ChecklistTab'
 
 export default function Dashboard({ session, onLogout }) {
   const [activeTab, setActiveTab] = useState('products')
+  const [showChecklist, setShowChecklist] = useState(false)
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('show') === 'checklist') {
+      setShowChecklist(true)
+    }
+  }, [])
 
   function handleLogout() {
     localStorage.removeItem('scraper_session')
@@ -15,6 +24,7 @@ export default function Dashboard({ session, onLogout }) {
   const tabs = [
     { id: 'products', label: 'Products', icon: Package },
     { id: 'stores',   label: 'Stores',   icon: ShoppingBag },
+    ...(showChecklist ? [{ id: 'checklist', label: 'Checklist', icon: CheckSquare }] : []),
   ]
 
   return (
@@ -57,8 +67,9 @@ export default function Dashboard({ session, onLogout }) {
           </h1>
         </header>
         <main className="flex-1 overflow-auto">
-          {activeTab === 'products' && <ProductsTab />}
-          {activeTab === 'stores'   && <StoresTab />}
+          {activeTab === 'products'  && <ProductsTab />}
+          {activeTab === 'stores'    && <StoresTab />}
+          {activeTab === 'checklist' && showChecklist && <ChecklistTab />}
         </main>
       </div>
     </div>
