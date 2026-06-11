@@ -4,16 +4,15 @@ import { api } from '../../lib/api'
 import {
   AlertTriangle, Plus, Trash2, Download, RefreshCw,
   ArrowLeft, ShieldAlert, ShieldCheck, Search, X, Upload, FileDown,
-  CheckCircle2, XCircle, SkipForward,
+  CheckCircle2, XCircle, SkipForward, Zap,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 const fmt = n => Number(n || 0).toLocaleString()
 
-// Global cache — persists across navigation, never resets unless forced
-const CACHE = { banned: null, live: null, ts: 0 }
-const STALE_MS = 120_000 // 2 minutes
+const CACHE = { banned: null, live: null, autods: null, ts: 0 }
+const STALE_MS = 120_000
 
 function timeAgo(dateStr) {
   if (!dateStr) return null
@@ -28,10 +27,11 @@ function timeAgo(dateStr) {
 }
 
 export default function BannedSkusPage({ onBack, initialStore }) {
-  const [banned,         setBanned]         = useState(CACHE.banned || [])
-  const [live,           setLive]           = useState(CACHE.live   || [])
+  const [banned,         setBanned]         = useState(CACHE.banned  || [])
+  const [live,           setLive]           = useState(CACHE.live    || [])
+  const [autods,         setAutods]         = useState(CACHE.autods  || [])
   const [loading,        setLoading]        = useState(!CACHE.banned)
-  const [search,         setSearch]         = useState(initialStore || '')
+  const [search,         setSearch]         = useState(initialStore  || '')
   const [newSku,         setNewSku]         = useState('')
   const [newReason,      setNewReason]      = useState('')
   const [adding,         setAdding]         = useState(false)
@@ -42,7 +42,7 @@ export default function BannedSkusPage({ onBack, initialStore }) {
   const [downloadingAll, setDownloadingAll] = useState(false)
   const [importing,      setImporting]      = useState(false)
   const [importResult,   setImportResult]   = useState(null)
-  const [importProgress, setImportProgress] = useState(null) // { done, total, pct }
+  const [importProgress, setImportProgress] = useState(null)
   const fileInputRef = useRef(null)
 
   async function loadAll(force = false) {
@@ -50,13 +50,20 @@ export default function BannedSkusPage({ onBack, initialStore }) {
     if (!CACHE.banned) setLoading(true)
     setError(null)
     try {
-      const data = await api.get('/api/banned-skus/combined')
+      const [data, autodsData] = await Promise.all([
+        api.get('/api/banned-skus/combined'),
+        api.get('/api/banned-skus/autods'),
+      ])
       if (data) {
         CACHE.banned = data.banned
         CACHE.live   = data.live
         CACHE.ts     = Date.now()
         setBanned(data.banned)
         setLive(data.live)
+      }
+      if (Array.isArray(autodsData)) {
+        CACHE.autods = autodsData
+        setAutods(autodsData)
       }
     } catch (e) {
       setError(e.message)
@@ -111,11 +118,7 @@ export default function BannedSkusPage({ onBack, initialStore }) {
       a.href = url; a.download = `banned_skus_live_${new Date().toISOString().slice(0,10)}.csv`
       document.body.appendChild(a); a.click()
       document.body.removeChild(a); URL.revokeObjectURL(url)
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setDownloading(false)
-    }
+    } catch (e) { setError(e.message) } finally { setDownloading(false) }
   }
 
   async function handleExportAll() {
@@ -128,23 +131,11 @@ export default function BannedSkusPage({ onBack, initialStore }) {
       a.href = url; a.download = `banned_skus_all_${new Date().toISOString().slice(0,10)}.csv`
       document.body.appendChild(a); a.click()
       document.body.removeChild(a); URL.revokeObjectURL(url)
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setDownloadingAll(false)
-    }
+    } catch (e) { setError(e.message) } finally { setDownloadingAll(false) }
   }
 
-  // Download a template CSV with example SKU formats
   function handleDownloadTemplate() {
-    const rows = [
-      'sku,reason',
-      'CUSTOM1,Optional reason here',
-      'CUSTOM2,Another reason',
-      'ALL_BAN_SKU,Ban everything matching this',
-      'B0ABC12345,Specific Amazon ASIN',
-      'AZDP_99999,AutoDS product ID',
-    ]
+    const rows = ['sku,reason','CUSTOM1,Optional reason here','B0ABC12345,Specific Amazon ASIN']
     const blob = new Blob([rows.join('\n')], { type: 'text/csv' })
     const url  = URL.createObjectURL(blob)
     const a    = document.createElement('a')
@@ -153,25 +144,15 @@ export default function BannedSkusPage({ onBack, initialStore }) {
     document.body.removeChild(a); URL.revokeObjectURL(url)
   }
 
-  // Parse CSV and bulk-import via single batch endpoint
   async function handleImportCsv(e) {
     const file = e.target.files?.[0]
     if (!file) return
     e.target.value = ''
-    setError(null)
-    setImportResult(null)
-    setImportProgress(null)
-
+    setError(null); setImportResult(null); setImportProgress(null)
     const text  = await file.text()
     const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)
     const dataLines = lines[0]?.toLowerCase().startsWith('sku') ? lines.slice(1) : lines
-
-    if (dataLines.length === 0) {
-      setError('CSV has no data rows.')
-      return
-    }
-
-    // Parse all rows upfront
+    if (dataLines.length === 0) { setError('CSV has no data rows.'); return }
     const items = []
     let skipped = 0
     for (const line of dataLines) {
@@ -181,48 +162,26 @@ export default function BannedSkusPage({ onBack, initialStore }) {
       if (!sku) { skipped++; continue }
       items.push({ sku, reason })
     }
-
-    if (items.length === 0) {
-      setError('No valid SKUs found in CSV.')
-      return
-    }
-
+    if (items.length === 0) { setError('No valid SKUs found in CSV.'); return }
     setImporting(true)
     setImportProgress({ done: 0, total: items.length, pct: 0 })
-
-    // Send in chunks of 500 — each chunk = 1 bulk SQL insert
-    const CHUNK    = 500
-    let success    = 0
-    let failed     = 0
-    let tooLong    = []
-    const errors   = []
-
+    const CHUNK = 500
+    let success = 0, failed = 0, tooLong = []
+    const errors = []
     for (let i = 0; i < items.length; i += CHUNK) {
       const chunk = items.slice(i, i + CHUNK)
       try {
         const resp = await fetch(`${BASE_URL}/api/banned-skus/bulk`, {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ items: chunk }),
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: chunk }),
         })
         const body = await resp.json().catch(() => ({}))
-        if (resp.ok) {
-          success  += body.inserted ?? chunk.length
-          tooLong   = tooLong.concat(body.too_long || [])
-          skipped  += body.skipped_too_long || 0
-        } else {
-          failed += chunk.length
-          errors.push(`Chunk ${Math.floor(i / CHUNK) + 1}: ${body.error || resp.statusText}`)
-        }
-      } catch (err) {
-        failed += chunk.length
-        errors.push(`Chunk ${Math.floor(i / CHUNK) + 1}: ${err.message}`)
-      }
-
+        if (resp.ok) { success += body.inserted ?? chunk.length; tooLong = tooLong.concat(body.too_long || []); skipped += body.skipped_too_long || 0 }
+        else { failed += chunk.length; errors.push(`Chunk ${Math.floor(i/CHUNK)+1}: ${body.error || resp.statusText}`) }
+      } catch (err) { failed += chunk.length; errors.push(`Chunk ${Math.floor(i/CHUNK)+1}: ${err.message}`) }
       const done = Math.min(i + CHUNK, items.length)
       setImportProgress({ done, total: items.length, pct: Math.round((done / items.length) * 100) })
     }
-
     setImportResult({ success, skipped, failed, tooLong, errors, total: dataLines.length })
     setImportProgress(null)
     CACHE.ts = 0
@@ -231,21 +190,26 @@ export default function BannedSkusPage({ onBack, initialStore }) {
   }
 
   const filteredBanned = banned.filter(b =>
-    !search ||
-    b.sku.toLowerCase().includes(search.toLowerCase()) ||
+    !search || b.sku.toLowerCase().includes(search.toLowerCase()) ||
     (b.reason || '').toLowerCase().includes(search.toLowerCase())
   )
-
   const filteredLive = live.filter(b =>
     !search ||
-    (b.sku        || '').toLowerCase().includes(search.toLowerCase()) ||
+    (b.sku || '').toLowerCase().includes(search.toLowerCase()) ||
     (b.store_name || '').toLowerCase().includes(search.toLowerCase()) ||
     (b.origin_sku || '').toLowerCase().includes(search.toLowerCase()) ||
     (b.autods_id  || '').toLowerCase().includes(search.toLowerCase()) ||
     (b.item_id    || '').toLowerCase().includes(search.toLowerCase())
   )
+  const filteredAutods = autods.filter(b =>
+    !search ||
+    (b.sku || '').toLowerCase().includes(search.toLowerCase()) ||
+    (b.autods_id || '').toLowerCase().includes(search.toLowerCase()) ||
+    (b.reason || '').toLowerCase().includes(search.toLowerCase())
+  )
 
-  const affectedStores = [...new Set(live.map(l => l.store_name))]
+  const affectedStores    = [...new Set(live.map(l => l.store_name))]
+  const autodsWithStock   = autods.filter(a => a.stock > 0).length
 
   return (
     <div className="p-6 space-y-5">
@@ -267,18 +231,16 @@ export default function BannedSkusPage({ onBack, initialStore }) {
           </button>
           <button onClick={handleExportAll} disabled={downloadingAll || banned.length === 0}
             className="flex items-center gap-1.5 text-xs bg-foreground hover:opacity-80 text-background rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50">
-            <Download size={11} />
-            {downloadingAll ? 'Downloading…' : 'Export All'}
+            <Download size={11} />{downloadingAll ? 'Downloading…' : 'Export All'}
           </button>
           <button onClick={handleExport} disabled={downloading || live.length === 0}
             className="flex items-center gap-1.5 text-xs bg-red-500 hover:bg-red-600 text-white rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50">
-            <Download size={11} />
-            {downloading ? 'Downloading…' : 'Export Live'}
+            <Download size={11} />{downloading ? 'Downloading…' : 'Export Live'}
           </button>
         </div>
       </div>
 
-      {/* Alert banner */}
+      {/* Alert banners */}
       {!loading && live.length > 0 && (
         <div className="flex items-center gap-3 bg-red-50 border border-red-300 rounded-xl px-4 py-3">
           <AlertTriangle size={15} className="text-red-500 flex-shrink-0" />
@@ -290,9 +252,20 @@ export default function BannedSkusPage({ onBack, initialStore }) {
           </div>
         </div>
       )}
+      {!loading && autodsWithStock > 0 && (
+        <div className="flex items-center gap-3 bg-amber-50 border border-amber-300 rounded-xl px-4 py-3">
+          <Zap size={15} className="text-amber-500 flex-shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-amber-700">
+              {autodsWithStock} banned SKU{autodsWithStock > 1 ? 's' : ''} still active in AutoDS with stock
+            </p>
+            <p className="text-xs text-amber-500 mt-0.5">AutoDS will keep updating prices/stock on eBay — remove from AutoDS</p>
+          </div>
+        </div>
+      )}
 
       {/* Summary cards */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         <Card>
           <CardHeader className="pb-1 pt-4 px-4">
             <CardDescription className="text-xs">Total Banned SKUs</CardDescription>
@@ -304,7 +277,7 @@ export default function BannedSkusPage({ onBack, initialStore }) {
         </Card>
         <Card className={!loading && live.length > 0 ? 'border-red-300 bg-red-50/30' : 'border-green-300 bg-green-50/30'}>
           <CardHeader className="pb-1 pt-4 px-4">
-            <CardDescription className="text-xs">Currently Live on eBay</CardDescription>
+            <CardDescription className="text-xs">Live on eBay</CardDescription>
             <div className={`text-2xl font-bold ${!loading && live.length > 0 ? 'text-red-500' : 'text-green-600'}`}>
               {loading ? '…' : fmt(live.length)}
             </div>
@@ -313,8 +286,23 @@ export default function BannedSkusPage({ onBack, initialStore }) {
             <div className={`flex items-center gap-1 text-xs ${!loading && live.length > 0 ? 'text-red-500' : 'text-green-600'}`}>
               {loading ? <span className="text-muted-foreground">Checking…</span>
                 : live.length > 0
-                  ? <><AlertTriangle size={10} /> Needs immediate removal</>
+                  ? <><AlertTriangle size={10} /> Remove immediately</>
                   : <><ShieldCheck size={10} /> All clear</>}
+            </div>
+          </CardContent>
+        </Card>
+        <Card className={!loading && autodsWithStock > 0 ? 'border-amber-300 bg-amber-50/30' : ''}>
+          <CardHeader className="pb-1 pt-4 px-4">
+            <CardDescription className="text-xs">Active in AutoDS</CardDescription>
+            <div className={`text-2xl font-bold ${!loading && autods.length > 0 ? 'text-amber-500' : 'text-green-600'}`}>
+              {loading ? '…' : fmt(autods.length)}
+            </div>
+          </CardHeader>
+          <CardContent className="pt-0 px-4 pb-3">
+            <div className={`flex items-center gap-1 text-xs ${autodsWithStock > 0 ? 'text-amber-500' : 'text-muted-foreground'}`}>
+              {loading ? 'Checking…' : autodsWithStock > 0
+                ? <><Zap size={10} /> {autodsWithStock} with stock</>
+                : 'No stock risk'}
             </div>
           </CardContent>
         </Card>
@@ -337,7 +325,6 @@ export default function BannedSkusPage({ onBack, initialStore }) {
       {/* Add SKU */}
       <Card>
         <CardContent className="pt-4 pb-4 space-y-3">
-          {/* Single add row */}
           <p className="text-xs font-semibold">Add Banned SKU</p>
           <div className="flex gap-2">
             <input type="text" value={newSku} onChange={e => setNewSku(e.target.value)}
@@ -353,89 +340,51 @@ export default function BannedSkusPage({ onBack, initialStore }) {
               <Plus size={13} />{adding ? 'Adding…' : 'Add'}
             </button>
           </div>
-
-          {/* Divider */}
           <div className="flex items-center gap-2">
             <div className="flex-1 h-px bg-border" />
             <span className="text-[10px] text-muted-foreground uppercase tracking-wide">or bulk import via CSV</span>
             <div className="flex-1 h-px bg-border" />
           </div>
-
-          {/* CSV import row */}
           <div className="flex items-center gap-2 flex-wrap">
             <button onClick={handleDownloadTemplate}
               className="flex items-center gap-1.5 text-xs border border-border rounded-lg px-3 py-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors">
               <FileDown size={12} /> Download Template
             </button>
             <span className="text-xs text-muted-foreground">→ fill in SKUs → then</span>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,text/csv"
-              onChange={handleImportCsv}
-              className="hidden"
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={importing}
+            <input ref={fileInputRef} type="file" accept=".csv,text/csv" onChange={handleImportCsv} className="hidden" />
+            <button onClick={() => fileInputRef.current?.click()} disabled={importing}
               className="flex items-center gap-1.5 text-xs bg-foreground text-background hover:opacity-80 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50 font-medium">
-              <Upload size={12} />
-              {importing ? 'Importing…' : 'Import CSV'}
+              <Upload size={12} />{importing ? 'Importing…' : 'Import CSV'}
             </button>
           </div>
-
-          {/* Progress bar — shown while importing */}
           {importProgress && (
             <div className="space-y-1.5">
               <div className="flex justify-between text-xs text-muted-foreground">
-                <span className="animate-pulse">
-                  Importing… {importProgress.done.toLocaleString()} / {importProgress.total.toLocaleString()} SKUs
-                </span>
+                <span className="animate-pulse">Importing… {importProgress.done.toLocaleString()} / {importProgress.total.toLocaleString()} SKUs</span>
                 <span className="font-mono font-semibold">{importProgress.pct}%</span>
               </div>
               <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-red-500 rounded-full transition-all duration-300"
-                  style={{ width: `${importProgress.pct}%` }}
-                />
+                <div className="h-full bg-red-500 rounded-full transition-all duration-300" style={{ width: `${importProgress.pct}%` }} />
               </div>
             </div>
           )}
-
-          {/* Import result banner */}
           {importResult && (
             <div className="rounded-lg border border-border bg-muted/30 px-3 py-2.5 space-y-1.5">
-              <p className="text-xs font-semibold">
-                Import complete — {importResult.total.toLocaleString()} row{importResult.total !== 1 ? 's' : ''} processed
-              </p>
+              <p className="text-xs font-semibold">Import complete — {importResult.total.toLocaleString()} rows processed</p>
               <div className="flex flex-wrap gap-3 text-xs">
-                <span className="flex items-center gap-1 text-green-600">
-                  <CheckCircle2 size={11} /> {importResult.success.toLocaleString()} added
-                </span>
-                <span className="flex items-center gap-1 text-muted-foreground">
-                  <SkipForward size={11} /> {importResult.skipped.toLocaleString()} skipped (blank)
-                </span>
-                {importResult.failed > 0 && (
-                  <span className="flex items-center gap-1 text-red-500">
-                    <XCircle size={11} /> {importResult.failed.toLocaleString()} failed
-                  </span>
-                )}
+                <span className="flex items-center gap-1 text-green-600"><CheckCircle2 size={11} /> {importResult.success.toLocaleString()} added</span>
+                <span className="flex items-center gap-1 text-muted-foreground"><SkipForward size={11} /> {importResult.skipped.toLocaleString()} skipped</span>
+                {importResult.failed > 0 && <span className="flex items-center gap-1 text-red-500"><XCircle size={11} /> {importResult.failed.toLocaleString()} failed</span>}
               </div>
               {importResult.errors.length > 0 && (
                 <details className="text-xs">
                   <summary className="cursor-pointer text-red-500 hover:underline">Show errors</summary>
-                  <ul className="mt-1 space-y-0.5 font-mono text-red-400">
-                    {importResult.errors.map((e, i) => <li key={i}>{e}</li>)}
-                  </ul>
+                  <ul className="mt-1 space-y-0.5 font-mono text-red-400">{importResult.errors.map((e, i) => <li key={i}>{e}</li>)}</ul>
                 </details>
               )}
-              <button onClick={() => setImportResult(null)}
-                className="text-[10px] text-muted-foreground hover:text-foreground underline">
-                Dismiss
-              </button>
+              <button onClick={() => setImportResult(null)} className="text-[10px] text-muted-foreground hover:text-foreground underline">Dismiss</button>
             </div>
           )}
-
           {error && <p className="text-xs text-red-500">{error}</p>}
         </CardContent>
       </Card>
@@ -454,6 +403,10 @@ export default function BannedSkusPage({ onBack, initialStore }) {
             className={`px-4 py-1.5 text-xs font-medium transition-colors ${tab === 'live' ? 'bg-red-500 text-white' : 'bg-card text-muted-foreground hover:text-foreground'}`}>
             Live on eBay {!loading && live.length > 0 && <span className="ml-1 bg-white/20 px-1 rounded">{live.length}</span>}
           </button>
+          <button onClick={() => setTab('autods')}
+            className={`px-4 py-1.5 text-xs font-medium transition-colors ${tab === 'autods' ? 'bg-amber-500 text-white' : 'bg-card text-muted-foreground hover:text-foreground'}`}>
+            In AutoDS {!loading && autods.length > 0 && <span className="ml-1 bg-white/20 px-1 rounded">{autods.length}</span>}
+          </button>
           <button onClick={() => setTab('all')}
             className={`px-4 py-1.5 text-xs font-medium transition-colors ${tab === 'all' ? 'bg-foreground text-background' : 'bg-card text-muted-foreground hover:text-foreground'}`}>
             All Banned ({loading ? '…' : banned.length})
@@ -461,19 +414,17 @@ export default function BannedSkusPage({ onBack, initialStore }) {
         </div>
       </div>
 
-      {/* Live table */}
+      {/* Live on eBay tab */}
       {tab === 'live' && (
         <Card>
           <CardHeader className="pb-2 pt-4 px-4">
             <CardTitle className="text-sm flex items-center gap-2">
               {live.length > 0
-                ? <><AlertTriangle size={13} className="text-red-500" /> Banned SKUs Currently Live</>
+                ? <><AlertTriangle size={13} className="text-red-500" /> Banned SKUs Currently Live on eBay</>
                 : <><ShieldCheck size={13} className="text-green-600" /> No Banned SKUs Live</>}
             </CardTitle>
             <CardDescription className="text-xs">
-              {live.length > 0
-                ? `${live.length} found on eBay — remove immediately`
-                : 'All banned SKUs are off eBay'}
+              {live.length > 0 ? `${live.length} found on eBay — remove immediately` : 'All banned SKUs are off eBay'}
             </CardDescription>
           </CardHeader>
           <CardContent className="p-0">
@@ -526,7 +477,70 @@ export default function BannedSkusPage({ onBack, initialStore }) {
         </Card>
       )}
 
-      {/* All banned table */}
+      {/* AutoDS tab */}
+      {tab === 'autods' && (
+        <Card>
+          <CardHeader className="pb-2 pt-4 px-4">
+            <CardTitle className="text-sm flex items-center gap-2">
+              <Zap size={13} className="text-amber-500" /> Banned SKUs Still Active in AutoDS
+            </CardTitle>
+            <CardDescription className="text-xs">
+              {autods.length > 0
+                ? `${autods.length} banned SKUs still monitored by AutoDS${autodsWithStock > 0 ? ` — ${autodsWithStock} have stock` : ''}`
+                : 'No banned SKUs active in AutoDS'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-0">
+            {loading ? (
+              <div className="p-10 text-center">
+                <div className="inline-block w-5 h-5 border-2 border-amber-300 border-t-amber-500 rounded-full animate-spin mb-2" />
+                <p className="text-xs text-muted-foreground">Loading…</p>
+              </div>
+            ) : filteredAutods.length === 0 ? (
+              <div className="p-10 text-center">
+                <ShieldCheck size={24} className="text-green-500 mx-auto mb-2" />
+                <p className="text-sm text-muted-foreground">{search ? 'No results match' : 'No banned SKUs in AutoDS'}</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-border bg-muted/30">
+                      {['SKU','AutoDS ID','Price','Stock','Status','Reason','Added','Last Updated'].map(h => (
+                        <th key={h} className="text-left px-3 py-2 font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredAutods.map((row, i) => (
+                      <tr key={i} className={`border-b border-border/50 transition-colors ${row.stock > 0 ? 'bg-amber-50/40 hover:bg-amber-50/60' : 'hover:bg-muted/30'}`}>
+                        <td className="px-3 py-2 font-mono font-bold text-amber-600 whitespace-nowrap">{row.sku}</td>
+                        <td className="px-3 py-2 font-mono text-gray-500 whitespace-nowrap">{row.autods_id || '—'}</td>
+                        <td className="px-3 py-2 tabular-nums">${Number(row.price || 0).toFixed(2)}</td>
+                        <td className="px-3 py-2 text-center">
+                          <span className={`px-1.5 py-0.5 rounded font-medium ${row.stock > 0 ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}`}>
+                            {row.stock}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${row.inventory_status === 1 ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                            {row.inventory_status === 1 ? 'Active' : 'Inactive'}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-muted-foreground">{row.reason}</td>
+                        <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{timeAgo(row.added_at)}</td>
+                        <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{timeAgo(row.updated_at)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* All banned tab */}
       {tab === 'all' && (
         <Card>
           <CardHeader className="pb-2 pt-4 px-4">
@@ -556,13 +570,15 @@ export default function BannedSkusPage({ onBack, initialStore }) {
                   </thead>
                   <tbody>
                     {filteredBanned.map((row, i) => {
-                      const isLive = live.some(l => l.sku === row.sku)
+                      const isLive    = live.some(l => l.sku === row.sku)
+                      const inAutods  = autods.some(a => a.sku === row.sku)
                       return (
-                        <tr key={i} className={`border-b border-border/50 transition-colors ${isLive ? 'bg-red-50/40 hover:bg-red-50/60' : 'hover:bg-muted/30'}`}>
+                        <tr key={i} className={`border-b border-border/50 transition-colors ${isLive ? 'bg-red-50/40 hover:bg-red-50/60' : inAutods ? 'bg-amber-50/30 hover:bg-amber-50/50' : 'hover:bg-muted/30'}`}>
                           <td className="px-3 py-2">
                             <div className="flex items-center gap-2">
                               <span className="font-mono font-bold">{row.sku}</span>
-                              {isLive && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-600 uppercase animate-pulse">Live!</span>}
+                              {isLive   && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-red-100 text-red-600 uppercase animate-pulse">Live!</span>}
+                              {inAutods && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-600 uppercase">AutoDS</span>}
                             </div>
                           </td>
                           <td className="px-3 py-2 text-muted-foreground">{row.reason}</td>

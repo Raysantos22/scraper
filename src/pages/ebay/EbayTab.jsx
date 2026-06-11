@@ -1,5 +1,5 @@
 // C:\Users\ADMIN\scraper\src\pages\ebay\EbayTab.jsx
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { api } from '../../lib/api'
 import {
   RadialBarChart, RadialBar, PolarGrid, PolarRadiusAxis, Label,
@@ -9,6 +9,7 @@ import {
   TrendingUp, ShoppingBag, Search, X, SlidersHorizontal,
   Download, AlertCircle, CheckCircle2, Clock,
   PackageX, PackageCheck, Package, Zap, ZapOff, ListX,
+  Hash, ChevronDown, ChevronUp, Clipboard, FileSearch, ChevronRight, RefreshCw,
 } from 'lucide-react'
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter,
@@ -17,7 +18,8 @@ import {
   ChartContainer, ChartTooltip, ChartTooltipContent,
 } from '@/components/ui/chart'
 import StoreListingsPage from '../ebay/StoreListingsPage'
-import BannedSkusPage from '../ebay/BannedSkusPage'
+import BannedSkusPage    from '../ebay/BannedSkusPage'
+import SkuLookupPage     from '../ebay/SkuLookupPage'
 
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
@@ -571,6 +573,8 @@ function ExportSection({ summary, loading }) {
       .then(d => { if (!d.error) setCounts(d) })
       .catch(() => {})
   }, [])
+  const [refreshing, setRefreshing] = useState(false)
+
 
   async function handleDownload(exp) {
     setDownloading(d => ({ ...d, [exp.id]: true }))
@@ -654,39 +658,78 @@ function ExportSection({ summary, loading }) {
   )
 }
 
-// ─── Filter bar ───────────────────────────────────────────────────────────────
-function FilterBar({ search, onSearch, supplierFilter, onSupplierFilter, stockFilter, onStockFilter, resultCount, totalCount }) {
+// ─── Filter bar (with SKU Lookup button) ──────────────────────────────────────
+function FilterBar({ search, onSearch, supplierFilter, onSupplierFilter, stockFilter, onStockFilter, resultCount, totalCount, onSkuLookup, onRefresh, refreshing }) {
   const hasFilters = search || supplierFilter || stockFilter
   return (
-    <div className="flex flex-wrap items-center gap-3">
-      <div className="relative flex-1 min-w-[200px] max-w-xs">
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="relative flex-1 min-w-[180px] max-w-xs">
         <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-        <input type="text" value={search} onChange={e => onSearch(e.target.value)} placeholder="Search stores…"
-          className="w-full pl-8 pr-8 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground/60 transition-all" />
-        {search && <button onClick={() => onSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"><X size={12} /></button>}
+        <input
+          type="text"
+          value={search}
+          onChange={e => onSearch(e.target.value)}
+          placeholder="Search stores…"
+          className="w-full pl-8 pr-8 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring placeholder:text-muted-foreground/60 transition-all"
+        />
+        {search && (
+          <button onClick={() => onSearch('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+            <X size={12} />
+          </button>
+        )}
       </div>
       <div className="relative">
         <SlidersHorizontal size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-        <select value={supplierFilter} onChange={e => onSupplierFilter(e.target.value)}
-          className="pl-8 pr-7 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground transition-all">
+        <select
+          value={supplierFilter}
+          onChange={e => onSupplierFilter(e.target.value)}
+          className="pl-8 pr-7 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground transition-all"
+        >
           <option value="">All Suppliers</option>
           {SUPPLIERS_DEF.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
         </select>
       </div>
-      <select value={stockFilter} onChange={e => onStockFilter(e.target.value)}
-        className="px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground transition-all">
+      <select
+        value={stockFilter}
+        onChange={e => onStockFilter(e.target.value)}
+        className="px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer text-foreground transition-all"
+      >
         <option value="">All Stock</option>
         <option value="in">Has Active Listings</option>
         <option value="out">Has Out-of-Stock</option>
       </select>
-      <div className="flex items-center gap-2 ml-auto">
-        {hasFilters && (
+      {hasFilters && (
+        <>
           <button onClick={() => { onSearch(''); onSupplierFilter(''); onStockFilter('') }}
             className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors">
             <X size={11} /> Clear
           </button>
-        )}
-        {hasFilters && <span className="text-xs text-muted-foreground">{resultCount} of {totalCount}</span>}
+          <span className="text-xs text-muted-foreground">{resultCount} of {totalCount}</span>
+        </>
+      )}
+
+      {/* ── Right side buttons ── */}
+      <div className="ml-auto flex items-center gap-2">
+        {/* Refresh store stats */}
+        <button
+          onClick={onRefresh}
+          disabled={refreshing}
+          title="Recalculate store stats from live listings"
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-border rounded-lg bg-muted/30 hover:bg-muted/60 transition-all disabled:opacity-50 text-muted-foreground hover:text-foreground"
+        >
+          <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} />
+          {refreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
+
+        {/* SKU Lookup */}
+        <button
+          onClick={onSkuLookup}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-border rounded-lg bg-muted/30 hover:bg-blue-50 hover:border-blue-300 hover:text-blue-600 transition-all group"
+        >
+          <FileSearch size={12} className="text-muted-foreground group-hover:text-blue-500 transition-colors" />
+          SKU Lookup
+          <ChevronRight size={11} className="text-muted-foreground/50 group-hover:text-blue-400 transition-colors" />
+        </button>
       </div>
     </div>
   )
@@ -704,19 +747,28 @@ export default function StoresTab() {
   const [bannedStore,    setBannedStore]    = useState(null)
   const [bannedTotal,    setBannedTotal]    = useState(0)
   const [bannedOnEbay,   setBannedOnEbay]   = useState(0)
+  const [showSkuLookup,  setShowSkuLookup]  = useState(false)
   const [search,         setSearch]         = useState('')
   const [supplierFilter, setSupplierFilter] = useState('')
   const [stockFilter,    setStockFilter]    = useState('')
+  const [refreshing, setRefreshing] = useState(false)
+  const [bannedAutodsTotal,     setBannedAutodsTotal]     = useState(0)
+  const [bannedAutodsWithStock, setBannedAutodsWithStock] = useState(0)
 
   useEffect(() => {
     async function load() {
-      // Always fetch last-synced and banned count regardless of cache
       const [syncedData, countData] = await Promise.all([
         api.get('/api/sync/last-synced'),
         api.get('/api/banned-skus/count'),
       ])
       if (syncedData) setLastSynced(syncedData)
-      if (countData)  { setBannedTotal(countData.total); setBannedOnEbay(countData.on_ebay) }
+      // In useEffect load():
+      if (countData) {
+        setBannedTotal(countData.total)
+        setBannedOnEbay(countData.on_ebay)
+        setBannedAutodsTotal(countData.autods_total || 0)
+        setBannedAutodsWithStock(countData.autods_with_stock || 0)
+      }
 
       if (STORES_CACHE.data && Date.now() - STORES_CACHE.ts < STALE_MS) return
       if (!STORES_CACHE.data) setLoading(true)
@@ -733,7 +785,40 @@ export default function StoresTab() {
     }
     load()
   }, [])
+async function handleRefresh() {
+  setRefreshing(true)
+  try {
+    const resp = await fetch(`${BASE_URL}/api/sync/refresh-all`, { method: 'POST' })
+    const { results } = await resp.json()
+    console.log('Refresh results:', results)  // see per-step status in devtools
 
+    // Bust all local caches
+    STORES_CACHE.ts  = 0
+    SUMMARY_CACHE.ts = 0
+    SUPPLIER_CACHE.ts = 0
+
+    // Re-fetch everything
+    const [storeData, sumData, supData, countData] = await Promise.all([
+      api.get('/api/stores/combined'),
+      api.get('/api/stores/summary'),
+      api.get('/api/stores/suppliers'),
+      api.get('/api/banned-skus/count'),
+    ])
+    if (Array.isArray(storeData))           { setStores(storeData);    STORES_CACHE.data   = storeData; STORES_CACHE.ts   = Date.now() }
+    if (sumData && !Array.isArray(sumData)) { setSummary(sumData);     SUMMARY_CACHE.data  = sumData;   SUMMARY_CACHE.ts  = Date.now() }
+    if (supData && !Array.isArray(supData)) { setSuppliers(supData);   SUPPLIER_CACHE.data = supData;   SUPPLIER_CACHE.ts = Date.now() }
+    if (countData) {
+  setBannedTotal(countData.total)
+  setBannedOnEbay(countData.on_ebay)
+  setBannedAutodsTotal(countData.autods_total || 0)
+  setBannedAutodsWithStock(countData.autods_with_stock || 0)
+}
+  } catch (e) {
+    console.error('Refresh failed:', e)
+  } finally {
+    setRefreshing(false)
+  }
+}
   const filteredStores = useMemo(() => stores.filter(store => {
     if (search && !store.store_name.toLowerCase().includes(search.toLowerCase())) return false
     if (supplierFilter && Number(store[supplierFilter] || 0) === 0) return false
@@ -758,9 +843,10 @@ export default function StoresTab() {
   const noData    = !loading && stores.length === 0
   const storeCols = filteredStores.length === 1 ? 1 : filteredStores.length >= 5 ? 3 : 2
 
-  // ── Page-level navigation guards (must be after all hooks) ──
-  if (selectedStore) return <StoreListingsPage storeName={selectedStore} onBack={() => setSelectedStore(null)} />
-  if (showBanned)    return <BannedSkusPage initialStore={bannedStore} onBack={() => { setShowBanned(false); setBannedStore(null); STORES_CACHE.ts = 0 }} />
+  // ── Page-level navigation guards ──
+  if (selectedStore)  return <StoreListingsPage storeName={selectedStore} onBack={() => setSelectedStore(null)} />
+  if (showBanned)     return <BannedSkusPage initialStore={bannedStore} onBack={() => { setShowBanned(false); setBannedStore(null); STORES_CACHE.ts = 0 }} />
+  if (showSkuLookup)  return <SkuLookupPage onBack={() => setShowSkuLookup(false)} />
 
   return (
     <div className="p-6 space-y-6">
@@ -789,18 +875,17 @@ export default function StoresTab() {
           <SummaryCard label="AutoDS Products"   value={autodsTotal}   trendLabel="ASINs monitored"             subLabel="In AutoDS monitoring"          loading={loading} compact />
           <SummaryCard label="eBay + AutoDS"     value={paired}        trendLabel={`${pairedPct}% pair rate`}   subLabel="Amazon listings monitored"     accent="#22c55e"  loading={loading} compact />
           <SummaryCard label="Not Updating"      value={notUpdating}   trendLabel="need to be updated"          subLabel="No AutoDS monitoring"          accent="#ef4444"  loading={loading} compact />
-          {/* ── Banned SKUs card — clickable ── */}
-          <div onClick={() => setShowBanned(true)} className="cursor-pointer">
-            <SummaryCard
-              label="Banned on eBay"
-              value={bannedOnEbay}
-              trendLabel={`${bannedTotal} banned SKUs`}
-              subLabel="Needs immediate removal"
-              accent={bannedOnEbay > 0 ? '#ef4444' : '#22c55e'}
-              loading={loading}
-              compact
-            />
-          </div>
+          <div onClick={() => setShowBanned(true)} className="cursor-pointer col-span-2 sm:col-span-1">
+  <SummaryCard
+    label="Banned SKUs"
+    value={bannedOnEbay}
+    trendLabel={`${bannedTotal} banned · ${bannedAutodsTotal} in AutoDS`}
+    subLabel={bannedAutodsWithStock > 0 ? `⚠ ${bannedAutodsWithStock} AutoDS still has stock` : 'Needs immediate removal'}
+    accent={bannedOnEbay > 0 || bannedAutodsWithStock > 0 ? '#ef4444' : '#22c55e'}
+    loading={loading}
+    compact
+  />
+</div>
         </div>
       </div>
 
@@ -825,13 +910,17 @@ export default function StoresTab() {
               <p className="text-xs text-muted-foreground font-medium">
                 Stores <span className="opacity-50">({stores.length})</span>
               </p>
-              {!loading && stores.length > 0 && (
+              {/* Filter bar — SKU Lookup button is inside it on the right */}
+              {!loading && (
                 <FilterBar
-                  search={search} onSearch={setSearch}
-                  supplierFilter={supplierFilter} onSupplierFilter={setSupplierFilter}
-                  stockFilter={stockFilter} onStockFilter={setStockFilter}
-                  resultCount={filteredStores.length} totalCount={stores.length}
-                />
+                search={search}                onSearch={setSearch}
+                supplierFilter={supplierFilter} onSupplierFilter={setSupplierFilter}
+                stockFilter={stockFilter}       onStockFilter={setStockFilter}
+                resultCount={filteredStores.length} totalCount={stores.length}
+                onSkuLookup={() => setShowSkuLookup(true)}
+                onRefresh={handleRefresh}
+                refreshing={refreshing}
+              />
               )}
             </div>
 

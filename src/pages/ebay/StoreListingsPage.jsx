@@ -24,7 +24,10 @@ function getStatsKey(store, search, stock) {
 
 function fmtDate(d) {
   if (!d) return '—'
-  return new Date(d).toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' })
+  const dt = new Date(d)
+  const isDateOnly = d.length <= 10
+  if (isDateOnly) return dt.toLocaleDateString('en-AU', { day: '2-digit', month: 'short', year: 'numeric' })
+  return dt.toLocaleString('en-AU', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
 function QtyBadge({ qty }) {
@@ -85,7 +88,7 @@ const ListingRow = React.memo(function ListingRow({ listing }) {
       </td>
       <td className="px-4 py-3"><QtyBadge qty={listing.quantity} /></td>
       <td className="px-4 py-3 text-xs text-gray-400">{fmtDate(listing.oos_since)}</td>
-      <td className="px-4 py-3 text-xs text-gray-400">{fmtDate(listing.snapshot_date)}</td>
+      <td className="px-4 py-3 text-xs text-gray-400">{fmtDate(listing.scraped_at || listing.updated_at || listing.snapshot_date)}</td>
     </tr>
   )
 })
@@ -143,7 +146,8 @@ export default function StoreListingsPage({ storeName, onBack }) {
     const total    = res?.count    || 0
     const inCount  = inRes?.count  || 0
     const outCount = outRes?.count || 0
-    const snap     = res?.data?.[0]?.snapshot_date || null
+    const snap = res?.data?.[0]?.scraped_at || res?.data?.[0]?.updated_at || res?.data?.[0]?.snapshot_date || null
+
 
     setTotalCount(total)
     setInStock(inCount)
