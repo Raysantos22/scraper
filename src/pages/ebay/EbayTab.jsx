@@ -20,6 +20,7 @@ import {
 import StoreListingsPage from '../ebay/StoreListingsPage'
 import BannedSkusPage    from '../ebay/BannedSkusPage'
 import SkuLookupPage     from '../ebay/SkuLookupPage'
+import StoreLimitsPage   from '../ebay/StoreLimitsPage'
 
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
@@ -72,6 +73,34 @@ function chunkArray(arr, size) {
   const out = []
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
   return out
+}
+
+// ─── Limit helpers ────────────────────────────────────────────────────────────
+function fmtItems(n) {
+  if (n == null || isNaN(n)) return '—'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(0)}K`
+  return Number(n).toLocaleString()
+}
+function fmtAUD(n) {
+  if (n == null || isNaN(n)) return '—'
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000)     return `$${(n / 1_000).toFixed(0)}K`
+  return `$${Number(n).toLocaleString()}`
+}
+function limitPct(used, limit) {
+  if (!limit || limit === 0) return 0
+  return Math.min(100, Math.round((used / limit) * 100))
+}
+function limitBarColor(p) {
+  if (p >= 90) return '#ef4444'
+  if (p >= 80) return '#f59e0b'
+  return '#22c55e'
+}
+function limitTextColor(p) {
+  if (p >= 90) return 'text-red-600'
+  if (p >= 80) return 'text-amber-500'
+  return 'text-green-600'
 }
 
 // ─── Skeletons ────────────────────────────────────────────────────────────────
@@ -175,8 +204,30 @@ function DividerLabel({ label }) {
   )
 }
 
+// ─── Limit mini bar (used inside store cards) ─────────────────────────────────
+function LimitMiniBar({ label, used, limit, formatter }) {
+  const p         = limitPct(used, limit)
+  const barColor  = limitBarColor(p)
+  const textColor = limitTextColor(p)
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <p className="text-[9px] font-semibold uppercase tracking-widest text-muted-foreground">{label}</p>
+        <span className={`text-[10px] font-bold ${textColor}`}>{p}%</span>
+      </div>
+      <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${p}%`, background: barColor }} />
+      </div>
+      <div className="flex justify-between text-[9px] text-muted-foreground">
+        <span>{formatter(used)} used</span>
+        <span>{formatter(limit)} limit</span>
+      </div>
+    </div>
+  )
+}
+
 // ─── Store card ───────────────────────────────────────────────────────────────
-function StoreCard({ store, onSelect }) {
+function StoreCard({ store, onSelect, limitsMap }) {
   const total       = Number(store.total_items       || 0)
   const active      = Number(store.active_listings   || 0)
   const oos         = Number(store.out_of_stock      || 0)
@@ -190,28 +241,45 @@ function StoreCard({ store, onSelect }) {
   const hasBanned   = bannedCount > 0
   const pairedPct   = pct(paired, amazon || total)
 
+  // Check if this store has limit data
+  const lim     = limitsMap?.[store.store_name?.toUpperCase()] || null
+  const hasLimit = lim && (lim.items_limit > 0 || lim.revenue_limit > 0)
+  const ip      = hasLimit ? limitPct(lim.items_listed_sold,   lim.items_limit)   : 0
+  const rp      = hasLimit ? limitPct(lim.revenue_listed_sold, lim.revenue_limit) : 0
+  const limitWarn = ip >= 80 || rp >= 80
+
   const activeSuppliers = SUPPLIERS_DEF
     .filter(s => s.key !== 'amazon_items' && s.key !== 'other_items' && Number(store[s.key] || 0) > 0)
     .map(s => ({ label: s.label, val: fmt(Number(store[s.key])) }))
   const supChunks = chunkArray(activeSuppliers, 3)
   const hasSync   = paired > 0 || totalRisk > 0
 
+  // Border: red if banned, amber if limit warning, default otherwise
+  const cardBorder = hasBanned
+    ? 'bg-red-50/60 border-2 border-red-400 hover:shadow-[0_12px_30px_rgba(239,68,68,0.25)]'
+    : limitWarn
+      ? 'bg-amber-50/40 border-2 border-amber-400 hover:shadow-[0_12px_30px_rgba(245,158,11,0.20)]'
+      : 'bg-card border border-black/70 hover:shadow-[0_12px_30px_rgba(0,0,0,0.18)]'
+
   return (
     <button
       onClick={() => onSelect(store.store_name)}
-      className={`text-left rounded-2xl p-7 w-full shadow-sm transition-all duration-300 ease-out hover:-translate-y-1 hover:cursor-pointer
-        ${hasBanned
-          ? 'bg-red-50/60 border-2 border-red-400 hover:shadow-[0_12px_30px_rgba(239,68,68,0.25)]'
-          : 'bg-card border border-black/70 hover:shadow-[0_12px_30px_rgba(0,0,0,0.18)]'
-        }`}
+      className={`text-left rounded-2xl p-7 w-full shadow-sm transition-all duration-300 ease-out hover:-translate-y-1 hover:cursor-pointer ${cardBorder}`}
     >
       <div className="flex items-start justify-between mb-1">
         <h3 className="text-2xl font-black text-foreground capitalize leading-tight">{store.store_name}</h3>
-        {hasBanned && (
-          <span className="flex items-center gap-1 text-[10px] font-bold text-white bg-red-500 px-2 py-0.5 rounded-full ml-2 flex-shrink-0 animate-pulse">
-            ⚠ {bannedCount} BANNED
-          </span>
-        )}
+        <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
+          {hasBanned && (
+            <span className="flex items-center gap-1 text-[10px] font-bold text-white bg-red-500 px-2 py-0.5 rounded-full animate-pulse">
+              ⚠ {bannedCount} BANNED
+            </span>
+          )}
+          {limitWarn && !hasBanned && (
+            <span className="flex items-center gap-1 text-[10px] font-bold text-amber-700 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-full">
+              ⚠ LIMIT
+            </span>
+          )}
+        </div>
       </div>
       {store.last_updated && (
         <p className="text-[10px] text-muted-foreground mb-3">Updated {timeAgo(store.last_updated)}</p>
@@ -247,6 +315,27 @@ function StoreCard({ store, onSelect }) {
             { label: '',            val: ''                                       },
             { label: '',            val: ''                                       },
           ]} />
+        </>
+      )}
+
+      {/* ── Monthly Limits section ── */}
+      {hasLimit && (
+        <>
+          <DividerLabel label={limitWarn ? '⚠ Monthly Limits' : 'Monthly Limits'} />
+          <div className="space-y-2 pt-1">
+            <LimitMiniBar
+              label="Items"
+              used={lim.items_listed_sold}
+              limit={lim.items_limit}
+              formatter={fmtItems}
+            />
+            <LimitMiniBar
+              label="Revenue"
+              used={lim.revenue_listed_sold}
+              limit={lim.revenue_limit}
+              formatter={fmtAUD}
+            />
+          </div>
         </>
       )}
     </button>
@@ -573,8 +662,6 @@ function ExportSection({ summary, loading }) {
       .then(d => { if (!d.error) setCounts(d) })
       .catch(() => {})
   }, [])
-  const [refreshing, setRefreshing] = useState(false)
-
 
   async function handleDownload(exp) {
     setDownloading(d => ({ ...d, [exp.id]: true }))
@@ -658,8 +745,11 @@ function ExportSection({ summary, loading }) {
   )
 }
 
-// ─── Filter bar (with SKU Lookup button) ──────────────────────────────────────
-function FilterBar({ search, onSearch, supplierFilter, onSupplierFilter, stockFilter, onStockFilter, resultCount, totalCount, onSkuLookup, onRefresh, refreshing }) {
+// ─── Filter bar ───────────────────────────────────────────────────────────────
+function FilterBar({
+  search, onSearch, supplierFilter, onSupplierFilter, stockFilter, onStockFilter,
+  resultCount, totalCount, onSkuLookup, onRefresh, refreshing, onLimitsPage,
+}) {
   const hasFilters = search || supplierFilter || stockFilter
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -721,6 +811,16 @@ function FilterBar({ search, onSearch, supplierFilter, onSupplierFilter, stockFi
           {refreshing ? 'Refreshing…' : 'Refresh'}
         </button>
 
+        {/* Store Limits */}
+        <button
+          onClick={onLimitsPage}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-border rounded-lg bg-muted/30 hover:bg-amber-50 hover:border-amber-300 hover:text-amber-700 transition-all group"
+        >
+          <TrendingUp size={12} className="text-muted-foreground group-hover:text-amber-500 transition-colors" />
+          Store Limits
+          <ChevronRight size={11} className="text-muted-foreground/50 group-hover:text-amber-400 transition-colors" />
+        </button>
+
         {/* SKU Lookup */}
         <button
           onClick={onSkuLookup}
@@ -748,10 +848,12 @@ export default function StoresTab() {
   const [bannedTotal,    setBannedTotal]    = useState(0)
   const [bannedOnEbay,   setBannedOnEbay]   = useState(0)
   const [showSkuLookup,  setShowSkuLookup]  = useState(false)
+  const [showLimitsPage, setShowLimitsPage] = useState(false)
+  const [limitsMap,      setLimitsMap]      = useState({})
   const [search,         setSearch]         = useState('')
   const [supplierFilter, setSupplierFilter] = useState('')
   const [stockFilter,    setStockFilter]    = useState('')
-  const [refreshing, setRefreshing] = useState(false)
+  const [refreshing,     setRefreshing]     = useState(false)
   const [bannedAutodsTotal,     setBannedAutodsTotal]     = useState(0)
   const [bannedAutodsWithStock, setBannedAutodsWithStock] = useState(0)
 
@@ -762,7 +864,6 @@ export default function StoresTab() {
         api.get('/api/banned-skus/count'),
       ])
       if (syncedData) setLastSynced(syncedData)
-      // In useEffect load():
       if (countData) {
         setBannedTotal(countData.total)
         setBannedOnEbay(countData.on_ebay)
@@ -773,52 +874,67 @@ export default function StoresTab() {
       if (STORES_CACHE.data && Date.now() - STORES_CACHE.ts < STALE_MS) return
       if (!STORES_CACHE.data) setLoading(true)
 
-      const [storeData, sumData, supData] = await Promise.all([
+      const [storeData, sumData, supData, limitsData] = await Promise.all([
         api.get('/api/stores/combined'),
         api.get('/api/stores/summary'),
         api.get('/api/stores/suppliers'),
+        api.get('/api/store-limits'),
       ])
       if (Array.isArray(storeData))           { setStores(storeData);  STORES_CACHE.data   = storeData; STORES_CACHE.ts   = Date.now() }
       if (sumData && !Array.isArray(sumData)) { setSummary(sumData);   SUMMARY_CACHE.data  = sumData;   SUMMARY_CACHE.ts  = Date.now() }
       if (supData && !Array.isArray(supData)) { setSuppliers(supData); SUPPLIER_CACHE.data = supData;   SUPPLIER_CACHE.ts = Date.now() }
+
+      // Build limitsMap: { STORENAME_UPPER: limitRow }
+      if (Array.isArray(limitsData)) {
+        const map = {}
+        limitsData.forEach(l => { map[l.store_name.toUpperCase()] = l })
+        setLimitsMap(map)
+      }
+
       setLoading(false)
     }
     load()
   }, [])
-async function handleRefresh() {
-  setRefreshing(true)
-  try {
-    const resp = await fetch(`${BASE_URL}/api/sync/refresh-all`, { method: 'POST' })
-    const { results } = await resp.json()
-    console.log('Refresh results:', results)  // see per-step status in devtools
 
-    // Bust all local caches
-    STORES_CACHE.ts  = 0
-    SUMMARY_CACHE.ts = 0
-    SUPPLIER_CACHE.ts = 0
+  async function handleRefresh() {
+    setRefreshing(true)
+    try {
+      const resp = await fetch(`${BASE_URL}/api/sync/refresh-all`, { method: 'POST' })
+      const { results } = await resp.json()
+      console.log('Refresh results:', results)
 
-    // Re-fetch everything
-    const [storeData, sumData, supData, countData] = await Promise.all([
-      api.get('/api/stores/combined'),
-      api.get('/api/stores/summary'),
-      api.get('/api/stores/suppliers'),
-      api.get('/api/banned-skus/count'),
-    ])
-    if (Array.isArray(storeData))           { setStores(storeData);    STORES_CACHE.data   = storeData; STORES_CACHE.ts   = Date.now() }
-    if (sumData && !Array.isArray(sumData)) { setSummary(sumData);     SUMMARY_CACHE.data  = sumData;   SUMMARY_CACHE.ts  = Date.now() }
-    if (supData && !Array.isArray(supData)) { setSuppliers(supData);   SUPPLIER_CACHE.data = supData;   SUPPLIER_CACHE.ts = Date.now() }
-    if (countData) {
-  setBannedTotal(countData.total)
-  setBannedOnEbay(countData.on_ebay)
-  setBannedAutodsTotal(countData.autods_total || 0)
-  setBannedAutodsWithStock(countData.autods_with_stock || 0)
-}
-  } catch (e) {
-    console.error('Refresh failed:', e)
-  } finally {
-    setRefreshing(false)
+      STORES_CACHE.ts   = 0
+      SUMMARY_CACHE.ts  = 0
+      SUPPLIER_CACHE.ts = 0
+
+      const [storeData, sumData, supData, countData, limitsData] = await Promise.all([
+        api.get('/api/stores/combined'),
+        api.get('/api/stores/summary'),
+        api.get('/api/stores/suppliers'),
+        api.get('/api/banned-skus/count'),
+        api.get('/api/store-limits'),
+      ])
+      if (Array.isArray(storeData))           { setStores(storeData);    STORES_CACHE.data   = storeData; STORES_CACHE.ts   = Date.now() }
+      if (sumData && !Array.isArray(sumData)) { setSummary(sumData);     SUMMARY_CACHE.data  = sumData;   SUMMARY_CACHE.ts  = Date.now() }
+      if (supData && !Array.isArray(supData)) { setSuppliers(supData);   SUPPLIER_CACHE.data = supData;   SUPPLIER_CACHE.ts = Date.now() }
+      if (countData) {
+        setBannedTotal(countData.total)
+        setBannedOnEbay(countData.on_ebay)
+        setBannedAutodsTotal(countData.autods_total || 0)
+        setBannedAutodsWithStock(countData.autods_with_stock || 0)
+      }
+      if (Array.isArray(limitsData)) {
+        const map = {}
+        limitsData.forEach(l => { map[l.store_name.toUpperCase()] = l })
+        setLimitsMap(map)
+      }
+    } catch (e) {
+      console.error('Refresh failed:', e)
+    } finally {
+      setRefreshing(false)
+    }
   }
-}
+
   const filteredStores = useMemo(() => stores.filter(store => {
     if (search && !store.store_name.toLowerCase().includes(search.toLowerCase())) return false
     if (supplierFilter && Number(store[supplierFilter] || 0) === 0) return false
@@ -847,6 +963,7 @@ async function handleRefresh() {
   if (selectedStore)  return <StoreListingsPage storeName={selectedStore} onBack={() => setSelectedStore(null)} />
   if (showBanned)     return <BannedSkusPage initialStore={bannedStore} onBack={() => { setShowBanned(false); setBannedStore(null); STORES_CACHE.ts = 0 }} />
   if (showSkuLookup)  return <SkuLookupPage onBack={() => setShowSkuLookup(false)} />
+  if (showLimitsPage) return <StoreLimitsPage onBack={() => setShowLimitsPage(false)} />
 
   return (
     <div className="p-6 space-y-6">
@@ -876,16 +993,16 @@ async function handleRefresh() {
           <SummaryCard label="eBay + AutoDS"     value={paired}        trendLabel={`${pairedPct}% pair rate`}   subLabel="Amazon listings monitored"     accent="#22c55e"  loading={loading} compact />
           <SummaryCard label="Not Updating"      value={notUpdating}   trendLabel="need to be updated"          subLabel="No AutoDS monitoring"          accent="#ef4444"  loading={loading} compact />
           <div onClick={() => setShowBanned(true)} className="cursor-pointer col-span-2 sm:col-span-1">
-  <SummaryCard
-    label="Banned SKUs"
-    value={bannedOnEbay}
-    trendLabel={`${bannedTotal} banned · ${bannedAutodsTotal} in AutoDS`}
-    subLabel={bannedAutodsWithStock > 0 ? `⚠ ${bannedAutodsWithStock} AutoDS still has stock` : 'Needs immediate removal'}
-    accent={bannedOnEbay > 0 || bannedAutodsWithStock > 0 ? '#ef4444' : '#22c55e'}
-    loading={loading}
-    compact
-  />
-</div>
+            <SummaryCard
+              label="Banned SKUs"
+              value={bannedOnEbay}
+              trendLabel={`${bannedTotal} banned · ${bannedAutodsTotal} in AutoDS`}
+              subLabel={bannedAutodsWithStock > 0 ? `⚠ ${bannedAutodsWithStock} AutoDS still has stock` : 'Needs immediate removal'}
+              accent={bannedOnEbay > 0 || bannedAutodsWithStock > 0 ? '#ef4444' : '#22c55e'}
+              loading={loading}
+              compact
+            />
+          </div>
         </div>
       </div>
 
@@ -910,17 +1027,17 @@ async function handleRefresh() {
               <p className="text-xs text-muted-foreground font-medium">
                 Stores <span className="opacity-50">({stores.length})</span>
               </p>
-              {/* Filter bar — SKU Lookup button is inside it on the right */}
               {!loading && (
                 <FilterBar
-                search={search}                onSearch={setSearch}
-                supplierFilter={supplierFilter} onSupplierFilter={setSupplierFilter}
-                stockFilter={stockFilter}       onStockFilter={setStockFilter}
-                resultCount={filteredStores.length} totalCount={stores.length}
-                onSkuLookup={() => setShowSkuLookup(true)}
-                onRefresh={handleRefresh}
-                refreshing={refreshing}
-              />
+                  search={search}                 onSearch={setSearch}
+                  supplierFilter={supplierFilter} onSupplierFilter={setSupplierFilter}
+                  stockFilter={stockFilter}       onStockFilter={setStockFilter}
+                  resultCount={filteredStores.length} totalCount={stores.length}
+                  onSkuLookup={() => setShowSkuLookup(true)}
+                  onLimitsPage={() => setShowLimitsPage(true)}
+                  onRefresh={handleRefresh}
+                  refreshing={refreshing}
+                />
               )}
             </div>
 
@@ -949,6 +1066,7 @@ async function handleRefresh() {
                   <StoreCard
                     key={store.store_name}
                     store={store}
+                    limitsMap={limitsMap}
                     onSelect={name => {
                       const s = stores.find(x => x.store_name === name)
                       if (s && Number(s.banned_count || 0) > 0) {

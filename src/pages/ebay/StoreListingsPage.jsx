@@ -4,7 +4,7 @@ import { api } from '../../lib/api'
 import {
   ArrowLeft, Search, X, SlidersHorizontal,
   ChevronLeft, ChevronRight, ExternalLink,
-  Package, TrendingUp, AlertCircle, Hash,
+  Package, TrendingUp, AlertCircle, Hash, Download,
 } from 'lucide-react'
 
 const PAGE_SIZE = 50
@@ -105,6 +105,7 @@ export default function StoreListingsPage({ storeName, onBack }) {
   const [stockFilter,  setStockFilter]  = useState('')
   const [searchInput,  setSearchInput]  = useState('')
   const [search,       setSearch]       = useState('')
+  const [exporting,    setExporting]    = useState(false)   // ← NEW
 
   // Debounce search
   useEffect(() => {
@@ -114,6 +115,28 @@ export default function StoreListingsPage({ storeName, onBack }) {
 
   // Reset page on filter change
   useEffect(() => { setPage(0) }, [search, stockFilter])
+
+  // ── Export all rows for this store (honours current filters) ─────────────
+  const handleExport = useCallback(async () => {                             // ← NEW
+    setExporting(true)
+    try {
+      const params = new URLSearchParams({ store_name: storeName })
+      if (search)      params.set('search', search)
+      if (stockFilter) params.set('stock',  stockFilter)
+
+      // Hit the CSV endpoint directly — let the browser trigger the download
+      const baseUrl = import.meta.env.VITE_API_URL || ''
+      const url     = `${baseUrl}/api/ebay/listings/export?${params}`
+      const a       = document.createElement('a')
+      a.href        = url
+      a.download    = ''
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+    } finally {
+      setExporting(false)
+    }
+  }, [storeName, search, stockFilter])
 
   // ── Fetch stats (total, inStock, outOfStock) with cache ───────────────────
   const fetchStats = useCallback(async () => {
@@ -147,7 +170,6 @@ export default function StoreListingsPage({ storeName, onBack }) {
     const inCount  = inRes?.count  || 0
     const outCount = outRes?.count || 0
     const snap = res?.data?.[0]?.scraped_at || res?.data?.[0]?.updated_at || res?.data?.[0]?.snapshot_date || null
-
 
     setTotalCount(total)
     setInStock(inCount)
@@ -245,6 +267,17 @@ export default function StoreListingsPage({ storeName, onBack }) {
               <option value="low">Low Stock (≤ 3)</option>
             </select>
           </div>
+
+          {/* ── Export button ── */}
+          <button
+            onClick={handleExport}
+            disabled={exporting || totalCount === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors shrink-0"
+          >
+            <Download size={12} />
+            {exporting ? 'Exporting…' : `Export CSV${hasFilters ? ' (filtered)' : ''}`}
+          </button>
+
           {hasFilters && (
             <button onClick={() => { setSearchInput(''); setStockFilter('') }}
               className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors ml-auto">
@@ -303,7 +336,6 @@ export default function StoreListingsPage({ storeName, onBack }) {
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50">
                   {['SKU', 'Origin SKU', 'AutoDS ID', 'Item ID', 'Price', 'Status', 'OOS Since', 'Snapshot'].map(h => (
-
                     <th key={h} className="text-left px-4 py-3 text-xs text-gray-400 font-medium">{h}</th>
                   ))}
                 </tr>
