@@ -950,7 +950,9 @@ export default function StoresTab() {
   const storeCount    = stores.length
 
   // Amazon/AutoDS numbers
-  const amazonTotal  = Number(summary?.ebay_total_amazon || 0)
+  // const amazonTotal  = Number(summary?.ebay_total_amazon || 0)
+  const amazonTotal = stores.reduce((acc, s) => acc + Number(s.amazon_items || 0), 0)
+
   const autodsTotal  = Number(summary?.autods_total       || 0)
   const paired       = Number(summary?.paired             || 0)
   const notUpdating  = Number(summary?.not_updating       || 0) + Number(summary?.not_updating_azdp || 0)
