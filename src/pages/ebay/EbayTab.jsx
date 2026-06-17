@@ -66,7 +66,7 @@ const SUPPLIERS_DEF = [
   { key: 'house_items',      label: 'House',       fill: '#3b82f6' },
   { key: 'vb_items',         label: "Vic's Bsmt",  fill: '#8b5cf6' },
   { key: 'kg_items',         label: 'Kogan',       fill: '#f43f5e' },
-  { key: 'so_items',         label: 'SO',          fill: '#10b981' },
+  { key: 'so_items',         label: 'Sherwood',    fill: '#10b981' },
   { key: 'cc_items',         label: 'Costco',      fill: '#f59e0b' },
   { key: 'amazon_items',     label: 'Amazon',      fill: '#ec4899' },
   { key: 'other_items',      label: 'Other',       fill: '#64748b' },
@@ -240,10 +240,7 @@ function StoreCard({ store, onSelect, limitsMap }) {
   const notUpd      = Number(store.not_updating      || 0)
   const notUpdAzdp  = Number(store.not_updating_azdp || 0)
   const bannedCount = Number(store.banned_count      || 0)
-const so     = Number(store.so_items || 0)
-  const kogan  = Number(store.kg_items || 0)
-const sherwo = Number(store.so_items || 0)
-const costco = Number(store.cc_items || 0)
+  
   const totalRisk   = notUpd + notUpdAzdp
   const hasBanned   = bannedCount > 0
   const pairedPct   = pct(paired, amazon || total)
@@ -296,13 +293,13 @@ const costco = Number(store.cc_items || 0)
         { label: 'Active',       val: fmt(active) },
         { label: 'Out of Stock', val: fmt(oos)    },
       ]} />
-{(amazon > 0 || other > 0) && (
-  <StatRow items={[
-    { label: 'Amazon', val: fmt(amazon) },
-    { label: 'Other',  val: fmt(other)  },
-    { label: '',       val: ''          },
-  ]} />
-)}
+      {(amazon > 0 || other > 0) && (
+        <StatRow items={[
+          { label: 'Amazon', val: fmt(amazon) },
+          { label: 'Other',  val: fmt(other)  },
+          { label: '',       val: ''          },
+        ]} />
+      )}
       {supChunks.map((chunk, i) => <StatRow key={i} items={chunk} />)}
       {hasSync && (
         <>
@@ -527,34 +524,34 @@ function SyncStatusCard({ summary, loading }) {
     { label: 'Not on eBay',     value: notOnEbay,  color: AMBER, total: autodsTotal },
   ]
 
-  // return (
-  //   <Card>
-  //     <CardHeader className="pb-3">
-  //       <CardTitle className="text-sm">eBay Sync Status</CardTitle>
-  //       <CardDescription className="text-xs">
-  //         Amazon listings pairing
-  //         {computedAt && <span className="ml-1 opacity-60">· cache {timeAgo(computedAt)}</span>}
-  //       </CardDescription>
-  //     </CardHeader>
-  //     <CardContent className="space-y-3">
-  //       {bars.map(b => {
-  //         const p = pct(b.value, b.total)
-  //         return (
-  //           <div key={b.label} className="space-y-1">
-  //             <div className="flex items-center justify-between text-xs">
-  //               <span className="text-muted-foreground">{b.label}</span>
-  //               <span className="font-medium tabular-nums">{fmt(b.value)} <span className="text-muted-foreground/50">({p}%)</span></span>
-  //             </div>
-  //             <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-  //               <div className="h-full rounded-full transition-all duration-700" style={{ width: `${p}%`, background: b.color }} />
-  //             </div>
-  //           </div>
-  //         )
-  //       })}
-  //       <p className="text-[10px] text-muted-foreground pt-1">{fmt(paired)} of {fmt(total)} Amazon eBay listings synced</p>
-  //     </CardContent>
-  //   </Card>
-  // )
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">eBay Sync Status</CardTitle>
+        <CardDescription className="text-xs">
+          Amazon listings pairing
+          {computedAt && <span className="ml-1 opacity-60">· cache {timeAgo(computedAt)}</span>}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {bars.map(b => {
+          const p = pct(b.value, b.total)
+          return (
+            <div key={b.label} className="space-y-1">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">{b.label}</span>
+                <span className="font-medium tabular-nums">{fmt(b.value)} <span className="text-muted-foreground/50">({p}%)</span></span>
+              </div>
+              <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                <div className="h-full rounded-full transition-all duration-700" style={{ width: `${p}%`, background: b.color }} />
+              </div>
+            </div>
+          )
+        })}
+        <p className="text-[10px] text-muted-foreground pt-1">{fmt(paired)} of {fmt(total)} Amazon eBay listings synced</p>
+      </CardContent>
+    </Card>
+  )
 }
 
 function SupplierDonutChart({ stores, loading }) {
@@ -957,8 +954,8 @@ export default function StoresTab() {
 const storeCount       = stores.length
 const activeStoreCount = stores.filter(s => Number(s.total_items || 0) > 0).length
   // Amazon/AutoDS numbers
-  // const amazonTotal  = Number(summary?.ebay_total_amazon || 0)
-  const amazonTotal = stores.reduce((acc, s) => acc + Number(s.amazon_items || 0), 0)
+  const amazonTotal  = Number(summary?.ebay_total_amazon || 0)
+  // const amazonTotal = stores.reduce((acc, s) => acc + Number(s.amazon_items || 0), 0)
 
   const autodsTotal  = Number(summary?.autods_total       || 0)
   const paired       = Number(summary?.paired             || 0)
