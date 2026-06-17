@@ -947,8 +947,8 @@ export default function StoresTab() {
   const totalListings = Number(summary?.total_listings || 0)
   const totalActive   = Number(summary?.total_active   || 0)
   const totalOos      = Number(summary?.total_oos       || 0)
-  const storeCount    = stores.length
-
+const storeCount       = stores.length
+const activeStoreCount = stores.filter(s => Number(s.total_items || 0) > 0).length
   // Amazon/AutoDS numbers
   // const amazonTotal  = Number(summary?.ebay_total_amazon || 0)
   const amazonTotal = stores.reduce((acc, s) => acc + Number(s.amazon_items || 0), 0)
@@ -989,8 +989,14 @@ export default function StoresTab() {
           <SummaryCard label="Total Listings"    value={totalListings} trendLabel="total this period"           subLabel="All eBay store listings"      loading={loading} compact />
           <SummaryCard label="Active Listings"   value={totalActive}   trendLabel="active this period"          subLabel="Currently in stock & live"     loading={loading} compact />
           <SummaryCard label="Out of Stock"      value={totalOos}      trendLabel="out of stock items"          subLabel="Needs restocking attention"    loading={loading} compact />
-          <SummaryCard label="Stores"            value={storeCount}    trendLabel="connected stores"            subLabel="eBay seller accounts tracked"  loading={loading} compact />
-          <SummaryCard label="Amazon on eBay"    value={amazonTotal}   trendLabel="Amazon SKUs on eBay"         subLabel="A-prefix and AZDP listings"    loading={loading} compact />
+<SummaryCard
+  label="Stores"
+  value={storeCount}
+  trendLabel={`${activeStoreCount} active · ${storeCount - activeStoreCount} inactive`}
+  subLabel="eBay seller accounts tracked"
+  loading={loading}
+  compact
+/>          <SummaryCard label="Amazon on eBay"    value={amazonTotal}   trendLabel="Amazon SKUs on eBay"         subLabel="A-prefix and AZDP listings"    loading={loading} compact />
           <SummaryCard label="AutoDS Products"   value={autodsTotal}   trendLabel="ASINs monitored"             subLabel="In AutoDS monitoring"          loading={loading} compact />
           <SummaryCard label="eBay + AutoDS"     value={paired}        trendLabel={`${pairedPct}% pair rate`}   subLabel="Amazon listings monitored"     accent="#22c55e"  loading={loading} compact />
           <SummaryCard label="Not Updating"      value={notUpdating}   trendLabel="need to be updated"          subLabel="No AutoDS monitoring"          accent="#ef4444"  loading={loading} compact />
