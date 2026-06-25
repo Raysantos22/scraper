@@ -34,19 +34,12 @@ export async function exportProductsCsv({
   if (!allProducts.length) return
 
   // 2. Fetch all override SKUs
-  const allSkus = allProducts.map(p => p.sku)
+const allSkus = allProducts.map(p => p.sku)
   let overridesBySku = {}
-  // Fetch overrides one by one for matching SKUs (batched via separate endpoint if needed)
-  // For export we use override-skus list we already have, and fetch individually only if needed
-  // Simple approach: fetch all overrides via product-overrides endpoint per SKU
-  await Promise.all(
-    allSkus.map(async sku => {
-      try {
-        const ov = await api.get(`/api/product-overrides/${encodeURIComponent(sku)}`)
-        if (ov) overridesBySku[sku] = ov
-      } catch {}
-    })
-  )
+  try {
+    const result = await api.post('/api/product-overrides/bulk-get', { skus: allSkus })
+    if (result && !result.error) overridesBySku = result
+  } catch {}
 
   // 3. Fetch variants for variation_parent products
   const parentIds = allProducts.filter(p => p.product_type === 'variation_parent').map(p => p.product_id)

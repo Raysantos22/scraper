@@ -91,10 +91,11 @@ const {
   if (filterMinPrice !== '') q = q.gte('price',  parseFloat(filterMinPrice))
   if (filterMaxPrice !== '') q = q.lte('price',  parseFloat(filterMaxPrice))
 
-  const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString()
-  if (filterFreshness === 'Updated within last 24hrs') q = q.gte('updated_at', daysAgo(1))
-  if (filterFreshness === '1-7 days')   q = q.lt('updated_at', daysAgo(1)).gte('updated_at', daysAgo(7))
-  if (filterFreshness === 'Older than 7 days') q = q.lt('updated_at', daysAgo(7))
+// Replace the old freshness block with:
+const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString()
+if (filterFreshness === '1')  q = q.gte('updated_at', daysAgo(1))
+if (filterFreshness === '7')  q = q.gte('updated_at', daysAgo(7))
+if (filterFreshness === '30') q = q.gte('updated_at', daysAgo(30))
 
   if (filterOverride === 'Edited')     q = q.eq('is_overridden', true)
 if (filterOverride === 'Not Edited') q = q.eq('is_overridden', false)

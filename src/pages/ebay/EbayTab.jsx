@@ -753,6 +753,7 @@ function ExportSection({ summary, loading }) {
 function FilterBar({
   search, onSearch, supplierFilter, onSupplierFilter, stockFilter, onStockFilter,
   resultCount, totalCount, onSkuLookup, onRefresh, refreshing, onLimitsPage,
+  onSkuCount, skuCountLoading,   // ← add these
 }) {
   const hasFilters = search || supplierFilter || stockFilter
   return (
@@ -834,6 +835,19 @@ function FilterBar({
           SKU Lookup
           <ChevronRight size={11} className="text-muted-foreground/50 group-hover:text-blue-400 transition-colors" />
         </button>
+        {/* SKU Count Download */}
+<button
+  onClick={onSkuCount}
+  disabled={skuCountLoading}
+  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-border rounded-lg bg-muted/30 hover:bg-green-50 hover:border-green-300 hover:text-green-700 transition-all group disabled:opacity-50"
+>
+  {skuCountLoading
+    ? <svg className="animate-spin h-3 w-3 text-green-500" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
+    : <Hash size={12} className="text-muted-foreground group-hover:text-green-500 transition-colors" />
+  }
+  {skuCountLoading ? 'Building…' : 'SKU Count'}
+  {!skuCountLoading && <Download size={9} className="text-muted-foreground/40 group-hover:text-green-400 transition-colors" />}
+</button>
       </div>
     </div>
   )
@@ -860,6 +874,8 @@ export default function StoresTab() {
   const [refreshing,     setRefreshing]     = useState(false)
   const [bannedAutodsTotal,     setBannedAutodsTotal]     = useState(0)
   const [bannedAutodsWithStock, setBannedAutodsWithStock] = useState(0)
+  const [skuCountLoading, setSkuCountLoading] = useState(false)
+
 
   useEffect(() => {
     async function load() {
@@ -899,7 +915,24 @@ export default function StoresTab() {
     }
     load()
   }, [])
-
+async function handleSkuCount() {
+  setSkuCountLoading(true)
+  try {
+    const resp = await fetch(`${BASE_URL}/api/export/sku-count`)
+    if (!resp.ok) throw new Error(`${resp.status}`)
+    const blob = await resp.blob()
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    const date = new Date().toISOString().slice(0, 10).replace(/-/g, '')
+    a.href = url; a.download = `sku_count_${date}.csv`
+    document.body.appendChild(a); a.click()
+    document.body.removeChild(a); URL.revokeObjectURL(url)
+  } catch (e) {
+    console.error('SKU count failed:', e)
+  } finally {
+    setSkuCountLoading(false)
+  }
+}
   async function handleRefresh() {
     setRefreshing(true)
     try {
@@ -1047,6 +1080,8 @@ const activeStoreCount = stores.filter(s => Number(s.total_items || 0) > 0).leng
                   resultCount={filteredStores.length} totalCount={stores.length}
                   onSkuLookup={() => setShowSkuLookup(true)}
                   onLimitsPage={() => setShowLimitsPage(true)}
+                  onSkuCount={handleSkuCount}
+                  skuCountLoading={skuCountLoading}
                   onRefresh={handleRefresh}
                   refreshing={refreshing}
                 />

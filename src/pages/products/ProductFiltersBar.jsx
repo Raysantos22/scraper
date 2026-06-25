@@ -37,11 +37,14 @@ export const FilterDropdown = React.memo(function FilterDropdown({ label, option
 
 // ─── Freshness dropdown (sends numeric days to server) ────────────────────────
 const FRESHNESS_OPTIONS = [
-  { label: 'Last 24 hours', value: '1'  },
-  { label: 'Last 7 days',   value: '7'  },
-  { label: 'Last 30 days',  value: '30' },
+  { label: 'Today',               value: 'today'   },
+  { label: 'Last 24 hours',       value: '1'       },
+  { label: 'Last 7 days',         value: '7'       },
+  { label: 'Last 30 days',        value: '30'      },
+  { label: 'Not updated in 2d',   value: 'stale_2' },
+  { label: 'Not updated in 7d',   value: 'stale_7' },
+  { label: 'Not updated in 30d',  value: 'stale_30'},
 ]
-
 export const FreshnessDropdown = React.memo(function FreshnessDropdown({ value, onChange }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
@@ -51,7 +54,7 @@ export const FreshnessDropdown = React.memo(function FreshnessDropdown({ value, 
     document.addEventListener('mousedown', h)
     return () => document.removeEventListener('mousedown', h)
   }, [open])
-  const label = FRESHNESS_OPTIONS.find(o => o.value === value)?.label || 'Updated'
+const label = FRESHNESS_OPTIONS.find(o => o.value === value)?.label || 'Updated'
   return (
     <div className="relative" ref={ref}>
       <button onClick={() => setOpen(o => !o)}
