@@ -78,6 +78,7 @@ const {
   search = '', filterCategory = '', filterStock = '',
   filterSupplier = '', filterMinQty = '', filterMinPrice = '',
   filterMaxPrice = '', filterFreshness = '', filterOverride = '',
+  filterUploaded = '',
 } = filters
 
   if (search)
@@ -91,11 +92,25 @@ const {
   if (filterMinPrice !== '') q = q.gte('price',  parseFloat(filterMinPrice))
   if (filterMaxPrice !== '') q = q.lte('price',  parseFloat(filterMaxPrice))
 
-// Replace the old freshness block with:
 const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString()
-if (filterFreshness === '1')  q = q.gte('updated_at', daysAgo(1))
-if (filterFreshness === '7')  q = q.gte('updated_at', daysAgo(7))
-if (filterFreshness === '30') q = q.gte('updated_at', daysAgo(30))
+
+// Updated At
+if (filterFreshness === 'today') q = q.gte('updated_at', daysAgo(1))
+if (filterFreshness === '1')     q = q.gte('updated_at', daysAgo(1))
+if (filterFreshness === '7')     q = q.gte('updated_at', daysAgo(7))
+if (filterFreshness === '30')    q = q.gte('updated_at', daysAgo(30))
+if (filterFreshness === 'stale_2')  q = q.lt('updated_at', daysAgo(2))
+if (filterFreshness === 'stale_7')  q = q.lt('updated_at', daysAgo(7))
+if (filterFreshness === 'stale_30') q = q.lt('updated_at', daysAgo(30))
+
+// Uploaded At (created_at)
+if (filterUploaded === 'today') q = q.gte('created_at', daysAgo(1))
+if (filterUploaded === '1')     q = q.gte('created_at', daysAgo(1))
+if (filterUploaded === '7')     q = q.gte('created_at', daysAgo(7))
+if (filterUploaded === '30')    q = q.gte('created_at', daysAgo(30))
+if (filterUploaded === 'stale_2')  q = q.lt('created_at', daysAgo(2))
+if (filterUploaded === 'stale_7')  q = q.lt('created_at', daysAgo(7))
+if (filterUploaded === 'stale_30') q = q.lt('created_at', daysAgo(30))
 
   if (filterOverride === 'Edited')     q = q.eq('is_overridden', true)
 if (filterOverride === 'Not Edited') q = q.eq('is_overridden', false)
@@ -114,7 +129,8 @@ export function useProductFilters() {
   const [filterMinPrice,  setFilterMinPrice]  = useState('')
   const [filterMaxPrice,  setFilterMaxPrice]  = useState('')
   const [filterFreshness, setFilterFreshness] = useState('')
-  const [filterOverride, setFilterOverride] = useState('')
+  const [filterOverride,  setFilterOverride]  = useState('')
+  const [filterUploaded,  setFilterUploaded]  = useState('')
 
   const debounceRef = useRef(null)
 
@@ -146,21 +162,23 @@ export function useProductFilters() {
 const filterState = useMemo(() => ({
   search, filterCategory, filterStock, filterSupplier,
   filterMinQty, filterMinPrice, filterMaxPrice, filterFreshness,
-  filterOverride,  // ← add this
+  filterOverride, filterUploaded,
 }), [search, filterCategory, filterStock, filterSupplier,
     filterMinQty, filterMinPrice, filterMaxPrice, filterFreshness,
-    filterOverride]) 
+    filterOverride, filterUploaded])
 
   const filterKey = useMemo(() => JSON.stringify(filterState), [filterState])
 const hasFilters = !!(
   search || filterCategory || filterStock || filterSupplier ||
-  filterMinQty || filterMinPrice || filterMaxPrice || filterFreshness || filterOverride
+  filterMinQty || filterMinPrice || filterMaxPrice || filterFreshness ||
+  filterOverride || filterUploaded
 )
 
 const clearFilters = useCallback(() => {
   setSearchInput(''); setSearch(''); setFilterCategory(''); setFilterStock('')
   setFilterSupplier(''); setFilterMinQty(''); setFilterMinPrice('')
-  setFilterMaxPrice(''); setFilterFreshness(''); setFilterOverride('') // ← add this
+  setFilterMaxPrice(''); setFilterFreshness(''); setFilterOverride('')
+  setFilterUploaded('')
   setSearchLoading(false)
 }, [])
 
@@ -168,7 +186,7 @@ const clearFilters = useCallback(() => {
     searchInput, setSearchInput, searchLoading,
     setFilterCategory, setFilterStock, setFilterSupplier,
     setFilterMinQty, setFilterMinPrice, setFilterMaxPrice, setFilterFreshness,
-    filterState, filterKey, hasFilters, clearFilters,  setFilterOverride,  // ← add this
-
+    filterState, filterKey, hasFilters, clearFilters, setFilterOverride,
+    setFilterUploaded,
   }
 }

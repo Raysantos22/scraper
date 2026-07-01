@@ -3,7 +3,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { api } from '../../lib/api'
 import {
   LayoutGrid, Table2, Plus, ChevronLeft, ChevronRight,
-  ChevronDown, ChevronUp, Download, Layers, Upload,
+  ChevronDown, ChevronUp, Download, Layers, Upload, Clock,
 } from 'lucide-react'
 import ProductEditPage, { parseImages, StockBadge } from './ProductEditPage'
 import { CsvOverrideUploadModal, ImportProgressToast, runBatches } from './CsvOverrideUploadModal'
@@ -37,16 +37,77 @@ function SummaryCard({ label, value, loading }) {
   )
 }
 
+function hoursSince(d) {
+  if (!d) return null
+  return (Date.now() - new Date(d).getTime()) / 3600000
+}
+
 function daysSince(d) {
   if (!d) return null
   return Math.floor((Date.now() - new Date(d).getTime()) / 864e5)
 }
 
 function freshnessRowClass(updatedAt) {
-  const days = daysSince(updatedAt)
-  if (days === null || days === 0) return ''
-  if (days <= 7) return 'bg-yellow-50/80'
-  return 'bg-red-50/80'
+  const h = hoursSince(updatedAt)
+  if (h === null || h < 24) return ''
+  if (h < 48)  return 'bg-yellow-50/60'
+  if (h < 168) return 'bg-orange-50/60'
+  return 'bg-red-50/70'
+}
+
+// ─── Relative time helper ─────────────────────────────────────────────────────
+function relativeTime(d) {
+  if (!d) return '—'
+  const diff  = Date.now() - new Date(d).getTime()
+  const mins  = Math.floor(diff / 60000)
+  const hours = Math.floor(diff / 3600000)
+  const days  = Math.floor(diff / 864e5)
+  if (mins < 2)   return 'just now'
+  if (mins < 60)  return `${mins}m ago`
+  if (hours < 24) return `${hours}h ago`
+  if (days === 1) return '1d ago'
+  if (days < 7)   return `${days}d ago`
+  if (days < 30)  return `${Math.floor(days / 7)}w ago`
+  return new Date(d).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })
+}
+
+// ─── Dot color by staleness (hours) ──────────────────────────────────────────
+function stalenessDot(d) {
+  const h = hoursSince(d)
+  if (h === null)  return { dot: 'bg-gray-300',   text: 'text-gray-300'  }
+  if (h < 24)      return { dot: 'bg-green-400',  text: 'text-gray-500'  }
+  if (h < 48)      return { dot: 'bg-yellow-400', text: 'text-yellow-700'}
+  if (h < 168)     return { dot: 'bg-orange-400', text: 'text-orange-700'}
+  return               { dot: 'bg-red-400',    text: 'text-red-600'   }
+}
+
+// ─── Date cell with tooltip ───────────────────────────────────────────────────
+function DateCell({ date, label }) {
+  const [hover, setHover] = useState(false)
+  if (!date) return <span className="text-gray-200 select-none">—</span>
+
+  const { dot, text } = stalenessDot(date)
+  const full = new Date(date).toLocaleString('en-AU', {
+    day: 'numeric', month: 'short', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  })
+
+  return (
+    <div
+      className="relative inline-flex items-center gap-1.5 cursor-default"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot}`} />
+      <span className={`whitespace-nowrap text-[11px] ${text}`}>{relativeTime(date)}</span>
+      {hover && (
+        <div className="absolute bottom-full left-0 mb-2 z-50 bg-gray-900 text-white text-[10px] px-2.5 py-2 rounded-lg whitespace-nowrap shadow-xl pointer-events-none">
+          <p className="text-gray-400 text-[9px] mb-0.5 uppercase tracking-wider font-medium">{label}</p>
+          <p className="font-medium">{full}</p>
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ─── Variant rows ─────────────────────────────────────────────────────────────
@@ -61,7 +122,7 @@ const VariantRows = React.memo(function VariantRows({ productId, onSelect }) {
   }, [productId])
 
   if (!variants) return (
-    <tr><td colSpan={8} className="bg-blue-50/30 py-2">
+    <tr><td colSpan={10} className="bg-blue-50/30 py-2">
       <div className="h-3 bg-blue-100 rounded animate-pulse w-40 ml-16" />
     </td></tr>
   )
@@ -84,6 +145,8 @@ const VariantRows = React.memo(function VariantRows({ productId, onSelect }) {
         <td className="px-4 py-2.5"><span className="text-gray-200">—</span></td>
         <td className="px-4 py-2.5 text-xs font-semibold text-gray-700">${parseFloat(v.price || 0).toFixed(2)}</td>
         <td className="px-4 py-2.5 text-xs text-gray-600">{v.stock}</td>
+        <td className="px-4 py-2.5"><span className="text-gray-200">—</span></td>
+        <td className="px-4 py-2.5"><span className="text-gray-200">—</span></td>
         <td className="px-4 py-2.5"><span className="text-gray-200">—</span></td>
         <td className="px-4 py-2.5"><StockBadge stock={v.stock} /></td>
       </tr>
@@ -136,6 +199,12 @@ const ProductRow = React.memo(function ProductRow({
         </td>
         <td className="px-4 py-2.5 font-semibold text-gray-900">${parseFloat(p.price || 0).toFixed(2)}</td>
         <td className="px-4 py-2.5 text-gray-600">{p.stock}</td>
+        <td className="px-4 py-2.5 text-xs">
+          <DateCell date={p.created_at || p.uploaded_at} label="Uploaded" />
+        </td>
+        <td className="px-4 py-2.5 text-xs">
+          <DateCell date={p.updated_at} label="Updated" />
+        </td>
         <td className="px-4 py-2.5 text-gray-400 truncate">{supplier?.supplier_name || '—'}</td>
         <td className="px-4 py-2.5">
           <div className="flex flex-col gap-1">
@@ -158,6 +227,7 @@ export default function ProductsTab() {
     setFilterCategory, setFilterStock, setFilterSupplier,
     setFilterMinQty, setFilterMinPrice, setFilterMaxPrice, setFilterFreshness,
     filterState, filterKey, hasFilters, clearFilters, setFilterOverride,
+    setFilterUploaded,
   } = useProductFilters()
 
   const [editingId,      setEditingId]      = useState(null)
@@ -189,7 +259,6 @@ export default function ProductsTab() {
   const [sortBy,  setSortBy]  = useState('created_at')
   const [sortDir, setSortDir] = useState('desc')
 
-  // Reset page when filters/sort change
   useEffect(() => { setPage(0) }, [filterKey, sortBy, sortDir])
 
   // ── Load meta once ───────────────────────────────────────────────────────
@@ -235,6 +304,7 @@ export default function ProductsTab() {
       ...(filterState.filterMinPrice  ? { minPrice: filterState.filterMinPrice }     : {}),
       ...(filterState.filterMaxPrice  ? { maxPrice: filterState.filterMaxPrice }     : {}),
       ...(filterState.filterFreshness ? { freshness: filterState.filterFreshness }   : {}),
+      ...(filterState.filterUploaded  ? { uploaded: filterState.filterUploaded }     : {}),
     })
 
     const res = await api.get(`/api/products?${params}`)
@@ -271,6 +341,7 @@ export default function ProductsTab() {
       ...(filterState.filterMinPrice  ? { minPrice: filterState.filterMinPrice }     : {}),
       ...(filterState.filterMaxPrice  ? { maxPrice: filterState.filterMaxPrice }     : {}),
       ...(filterState.filterFreshness ? { freshness: filterState.filterFreshness }   : {}),
+      ...(filterState.filterUploaded  ? { uploaded: filterState.filterUploaded }     : {}),
     })
 
     const stats = await api.get(`/api/products/stats?${params}`)
@@ -303,11 +374,13 @@ export default function ProductsTab() {
     else { setSortBy(col); setSortDir('asc') }
   }
 
-  function SortTh({ col, children }) {
+  function SortTh({ col, children, className = '' }) {
     const active = sortBy === col
     return (
-      <th onClick={() => toggleSort(col)}
-        className="text-left px-4 py-3 text-xs text-gray-400 font-medium cursor-pointer select-none hover:text-gray-600 transition-colors">
+      <th
+        onClick={() => toggleSort(col)}
+        className={`text-left px-4 py-3 text-xs text-gray-400 font-medium cursor-pointer select-none hover:text-gray-600 transition-colors ${className}`}
+      >
         <span className="flex items-center gap-1">
           {children}
           <span className="text-gray-300 text-[10px]">{active ? (sortDir === 'asc' ? '↑' : '↓') : '↕'}</span>
@@ -360,6 +433,7 @@ export default function ProductsTab() {
           setFilterSupplier={setFilterSupplier} setFilterMinQty={setFilterMinQty}
           setFilterMinPrice={setFilterMinPrice} setFilterMaxPrice={setFilterMaxPrice}
           setFilterFreshness={setFilterFreshness}
+          setFilterUploaded={setFilterUploaded}
           hasFilters={hasFilters} clearFilters={clearFilters}
           categories={categories} supplierOptions={supplierOptions}
           setFilterOverride={setFilterOverride}
@@ -415,18 +489,37 @@ export default function ProductsTab() {
           <div className="border border-gray-100 rounded-xl overflow-hidden">
             <table className="w-full text-xs table-fixed">
               <colgroup>
-                <col style={{width:'52px'}}/><col style={{width:'32%'}}/><col style={{width:'14%'}}/>
-                <col style={{width:'10%'}}/><col style={{width:'8%'}}/><col style={{width:'6%'}}/>
-                <col style={{width:'13%'}}/><col style={{width:'10%'}}/>
+                <col style={{width:'48px'}}/>   {/* img */}
+                <col style={{width:'26%'}}/>    {/* product */}
+                <col style={{width:'12%'}}/>    {/* sku */}
+                <col style={{width:'9%'}}/>     {/* category */}
+                <col style={{width:'7%'}}/>     {/* price */}
+                <col style={{width:'5%'}}/>     {/* stock */}
+                <col style={{width:'9%'}}/>     {/* uploaded */}
+                <col style={{width:'9%'}}/>     {/* updated */}
+                <col style={{width:'11%'}}/>    {/* supplier */}
+                <col style={{width:'9%'}}/>     {/* status */}
               </colgroup>
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50">
-                  <th className="px-4 py-3" />
+                  <th className="px-3 py-3" />
                   <SortTh col="title">Product</SortTh>
                   <th className="text-left px-4 py-3 text-xs text-gray-400 font-medium">SKU</th>
                   <SortTh col="category">Category</SortTh>
                   <SortTh col="price">Price</SortTh>
                   <SortTh col="stock">Stock</SortTh>
+                  <SortTh col="created_at">
+                    <span className="flex items-center gap-1">
+                      <Clock size={10} className="text-gray-300" />
+                      Uploaded
+                    </span>
+                  </SortTh>
+                  <SortTh col="updated_at">
+                    <span className="flex items-center gap-1">
+                      <Clock size={10} className="text-gray-300" />
+                      Updated
+                    </span>
+                  </SortTh>
                   <th className="text-left px-4 py-3 text-xs text-gray-400 font-medium">Supplier</th>
                   <th className="text-left px-4 py-3 text-xs text-gray-400 font-medium">Status</th>
                 </tr>
@@ -435,18 +528,20 @@ export default function ProductsTab() {
                 {loading
                   ? Array.from({ length: 12 }).map((_, i) => (
                       <tr key={i} className="border-b border-gray-50">
-                        <td className="px-4 py-3"><div className="w-9 h-9 rounded-lg bg-gray-100 animate-pulse" /></td>
+                        <td className="px-3 py-3"><div className="w-9 h-9 rounded-lg bg-gray-100 animate-pulse" /></td>
                         <td className="px-4 py-3"><div className="h-3 bg-gray-100 rounded animate-pulse w-4/5 mb-1.5" /><div className="h-2.5 bg-gray-50 rounded animate-pulse w-2/5" /></td>
                         <td className="px-4 py-3"><div className="h-3 bg-gray-100 rounded animate-pulse w-4/5" /></td>
                         <td className="px-4 py-3"><div className="h-5 bg-gray-100 rounded-full animate-pulse" /></td>
                         <td className="px-4 py-3"><div className="h-3 bg-gray-100 rounded animate-pulse w-3/4" /></td>
                         <td className="px-4 py-3"><div className="h-3 bg-gray-100 rounded animate-pulse w-1/2" /></td>
                         <td className="px-4 py-3"><div className="h-3 bg-gray-100 rounded animate-pulse w-4/5" /></td>
+                        <td className="px-4 py-3"><div className="h-3 bg-gray-100 rounded animate-pulse w-4/5" /></td>
+                        <td className="px-4 py-3"><div className="h-3 bg-gray-100 rounded animate-pulse w-4/5" /></td>
                         <td className="px-4 py-3"><div className="h-5 bg-gray-100 rounded-full animate-pulse" /></td>
                       </tr>
                     ))
                   : products.length === 0
-                  ? <tr><td colSpan={8} className="px-4 py-16 text-center text-gray-300">No products found.</td></tr>
+                  ? <tr><td colSpan={10} className="px-4 py-16 text-center text-gray-300">No products found.</td></tr>
                   : products.map(p => (
                       <ProductRow
                         key={p.product_id} p={p}
@@ -462,6 +557,7 @@ export default function ProductsTab() {
             </table>
           </div>
         ) : (
+          // ── Grid view (unchanged) ─────────────────────────────────────────
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
             {loading
               ? Array.from({ length: 10 }).map((_, i) => (
@@ -503,7 +599,20 @@ export default function ProductsTab() {
                           <StockBadge stock={p.stock} />
                         </div>
                         <p className="text-xs text-gray-400">{p.stock} units · <span className="font-mono">{p.sku}</span></p>
-                        {supplier && <span className="mt-2 inline-block text-xs text-gray-400 bg-gray-50 px-2 py-0.5 rounded-full">{supplier.supplier_name}</span>}
+                        {/* Date row */}
+                        <div className="mt-2 flex items-center gap-3">
+                          {p.created_at && (
+                            <span className="text-[10px] text-gray-400">
+                              ↑ {relativeTime(p.created_at || p.uploaded_at)}
+                            </span>
+                          )}
+                          {p.updated_at && (
+                            <span className="text-[10px] text-gray-400">
+                              ↻ {relativeTime(p.updated_at)}
+                            </span>
+                          )}
+                        </div>
+                        {supplier && <span className="mt-1.5 inline-block text-xs text-gray-400 bg-gray-50 px-2 py-0.5 rounded-full">{supplier.supplier_name}</span>}
                       </div>
                     </div>
                   )

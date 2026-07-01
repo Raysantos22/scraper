@@ -524,34 +524,34 @@ function SyncStatusCard({ summary, loading }) {
     { label: 'Not on eBay',     value: notOnEbay,  color: AMBER, total: autodsTotal },
   ]
 
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <CardTitle className="text-sm">eBay Sync Status</CardTitle>
-        <CardDescription className="text-xs">
-          Amazon listings pairing
-          {computedAt && <span className="ml-1 opacity-60">· cache {timeAgo(computedAt)}</span>}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {bars.map(b => {
-          const p = pct(b.value, b.total)
-          return (
-            <div key={b.label} className="space-y-1">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">{b.label}</span>
-                <span className="font-medium tabular-nums">{fmt(b.value)} <span className="text-muted-foreground/50">({p}%)</span></span>
-              </div>
-              <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-                <div className="h-full rounded-full transition-all duration-700" style={{ width: `${p}%`, background: b.color }} />
-              </div>
-            </div>
-          )
-        })}
-        <p className="text-[10px] text-muted-foreground pt-1">{fmt(paired)} of {fmt(total)} Amazon eBay listings synced</p>
-      </CardContent>
-    </Card>
-  )
+  // return (
+  //   <Card>
+  //     <CardHeader className="pb-3">
+  //       <CardTitle className="text-sm">eBay Sync Status</CardTitle>
+  //       <CardDescription className="text-xs">
+  //         Amazon listings pairing
+  //         {computedAt && <span className="ml-1 opacity-60">· cache {timeAgo(computedAt)}</span>}
+  //       </CardDescription>
+  //     </CardHeader>
+  //     <CardContent className="space-y-3">
+  //       {bars.map(b => {
+  //         const p = pct(b.value, b.total)
+  //         return (
+  //           <div key={b.label} className="space-y-1">
+  //             <div className="flex items-center justify-between text-xs">
+  //               <span className="text-muted-foreground">{b.label}</span>
+  //               <span className="font-medium tabular-nums">{fmt(b.value)} <span className="text-muted-foreground/50">({p}%)</span></span>
+  //             </div>
+  //             <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+  //               <div className="h-full rounded-full transition-all duration-700" style={{ width: `${p}%`, background: b.color }} />
+  //             </div>
+  //           </div>
+  //         )
+  //       })}
+  //       <p className="text-[10px] text-muted-foreground pt-1">{fmt(paired)} of {fmt(total)} Amazon eBay listings synced</p>
+  //     </CardContent>
+  //   </Card>
+  // )
 }
 
 function SupplierDonutChart({ stores, loading }) {

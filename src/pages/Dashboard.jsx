@@ -1,9 +1,10 @@
 // C:\Users\ADMIN\scraper\src\pages\Dashboard.jsx
 import { useState, useEffect } from 'react'
-import { LogOut, Package, ShoppingBag, CheckSquare } from 'lucide-react'
+import { LogOut, Package, ShoppingBag, CheckSquare, Star } from 'lucide-react'  // ← add Star
 import ProductsTab from './products/ProductsTab'
 import StoresTab from './ebay/EbayTab'
 import ChecklistTab from './checklist/ChecklistTab'
+import BestsellersTab from './bestsellers/BestsellersTab'  // ← add this
 
 export default function Dashboard({ session, onLogout }) {
   const [activeTab, setActiveTab] = useState('products')
@@ -22,8 +23,9 @@ export default function Dashboard({ session, onLogout }) {
   }
 
   const tabs = [
-    { id: 'products', label: 'Products', icon: Package },
-    { id: 'stores',   label: 'Stores',   icon: ShoppingBag },
+    { id: 'products',     label: 'Products',     icon: Package },
+    { id: 'stores',       label: 'Stores',       icon: ShoppingBag },
+    { id: 'bestsellers',  label: 'Bestsellers',  icon: Star },          // ← add this
     ...(showChecklist ? [{ id: 'checklist', label: 'Checklist', icon: CheckSquare }] : []),
   ]
 
@@ -67,9 +69,10 @@ export default function Dashboard({ session, onLogout }) {
           </h1>
         </header>
         <main className="flex-1 overflow-auto">
-          {activeTab === 'products'  && <ProductsTab />}
-          {activeTab === 'stores'    && <StoresTab />}
-          {activeTab === 'checklist' && showChecklist && <ChecklistTab />}
+          {activeTab === 'products'    && <ProductsTab />}
+          {activeTab === 'stores'      && <StoresTab />}
+          {activeTab === 'bestsellers' && <BestsellersTab />}   {/* ← add this */}
+          {activeTab === 'checklist'   && showChecklist && <ChecklistTab />}
         </main>
       </div>
     </div>
