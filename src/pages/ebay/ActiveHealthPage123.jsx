@@ -72,156 +72,19 @@ function buildWhere(query) {
   if (override === 'true') conditions.push('is_overridden = 1')
   return { where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '', params }
 }
-// --- CONTENT VIOLATION SCAN (title + description of paired eBay/AutoDS items) -
-
-
-// --- KEYSET-PAGINATED CSV (fast at any depth — no OFFSET, no full-scan-and-discard) ---
-function csvEscape(v) {
-  const s = v == null ? '' : String(v)
-  return (s.includes(',') || s.includes('"') || s.includes('\n'))
-    ? `"${s.replace(/"/g, '""')}"`
-    : s
-}
-
-// baseSql must select a `cursor_key` column (usually the sku/order column) and
-// must NOT include its own ORDER BY/LIMIT — those are added here.
-// cursorCol is the raw column expression used for keyset comparison, e.g. 'c.sku'
-async function keysetCsvExport(res, baseSql, params, cursorCol, columns, filename, batchSize = 5000) {
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+function csvRes(res, rows, headers, filename) {
+  const csv = [
+    headers.join(','),
+    ...rows.map(r => headers.map(h => {
+      const v = r[h] == null ? '' : String(r[h])
+      return v.includes(',') || v.includes('"') ? `"${v.replace(/"/g,'""')}"` : v
+    }).join(','))
+  ].join('\n')
+  res.setHeader('Content-Type', 'text/csv')
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
-  res.write(columns.join(',') + '\n')
-
-  let lastKey = null
-  while (true) {
-    const whereClause = lastKey === null ? '' : `AND ${cursorCol} > ?`
-    const queryParams = lastKey === null ? params : [...params, lastKey]
-
-    const [rows] = await pool.query(
-      `${baseSql} ${whereClause} ORDER BY ${cursorCol} ASC LIMIT ?`,
-      [...queryParams, batchSize]
-    )
-    if (rows.length === 0) break
-
-    let chunk = ''
-    for (const row of rows) {
-      chunk += columns.map(c => csvEscape(row[c])).join(',') + '\n'
-    }
-    const ok = res.write(chunk)
-    if (!ok) await new Promise(resolve => res.once('drain', resolve))
-
-    lastKey = rows[rows.length - 1].__cursor_key
-    if (rows.length < batchSize) break
-  }
-  res.end()
-}
-let _keywordRegexes = []
-async function loadBannedKeywords() {
-  const [rows] = await pool.query(
-    'SELECT keyword, match_type FROM banned_keywords WHERE active = 1'
-  )
-  _keywordRegexes = rows.map(r => ({
-    keyword: r.keyword,
-    re: r.match_type === 'exact_word'
-      ? new RegExp(`\\b${r.keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
-      : new RegExp(r.keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'),
-  }))
-}
-loadBannedKeywords().catch(e => console.error('loadBannedKeywords init error:', e.message))
-
-const _URL_RE          = /(?:https?:\/\/|www\.)\S+/gi
-const _DOMAIN_RE       = /\b[a-zA-Z0-9][a-zA-Z0-9-]*\.(?:com|net|org|co|io|shop|store)(?:\.au|\.uk|\.nz)?\b/gi
-const _EMAIL_RE        = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi
-const _CONTACT_RE      = /(contact us|visit us|visit our (?:website|store|page)|for more information[^.]*?(?:contact|visit)[^.]*)/gi
-const _PHONE_RE        = /(?:\+?61[\s.-]?)?(?:\(0\)|0)?[2-478][\s.-]?\d{4}[\s.-]?\d{4}\b|\b1[38]00[\s.-]?\d{3}[\s.-]?\d{3}\b/gi
-const _PHONE_LABEL_RE  = /\b(?:tel|telephone|call us now|call us on|mobile)\b\s*[:\-]\s*(?=\d)/gi
-const _AMAZON_RE       = /\bamazon(\.com)?\b/gi
-
-// New: messaging apps mentioned by name (WeChat, Line, Viber, Skype, Discord, Snapchat, TikTok, Kakao)
-const _MESSAGING_APP_RE = /\b(?:wechat|we chat|line id|viber|skype|discord|snapchat|kakao ?talk)\b/gi
-
-// New: "DM us", "message us", "inbox us", "follow us on" phrasing
-const _DM_PHRASE_RE = /\b(?:dm (?:us|me)|message us|inbox us|follow us on|add us on|find us on)\b/gi
-
-// New: @handle style social mentions (e.g. @mystorename)
-const _SOCIAL_HANDLE_RE = /(?<![\w.])@[a-zA-Z0-9_.]{3,30}\b/g
-
-function checkText(text) {
-  if (!text) return []
-  const hits = []
-  if (_URL_RE.test(text))           hits.push('url')
-  if (_EMAIL_RE.test(text))         hits.push('email')
-  if (_CONTACT_RE.test(text))       hits.push('contact_phrase')
-  if (_PHONE_RE.test(text) || _PHONE_LABEL_RE.test(text)) hits.push('phone')
-  if (_DOMAIN_RE.test(text))        hits.push('domain')
-  if (_AMAZON_RE.test(text))        hits.push('amazon_mention')
-  if (_MESSAGING_APP_RE.test(text)) hits.push('messaging_app')
-  if (_DM_PHRASE_RE.test(text))     hits.push('dm_phrase')
-  if (_SOCIAL_HANDLE_RE.test(text)) hits.push('social_handle')
-  ;[_URL_RE,_DOMAIN_RE,_EMAIL_RE,_CONTACT_RE,_PHONE_RE,_PHONE_LABEL_RE,_AMAZON_RE,_MESSAGING_APP_RE,_DM_PHRASE_RE,_SOCIAL_HANDLE_RE].forEach(r => r.lastIndex = 0)
-  for (const { keyword, re } of _keywordRegexes) {
-    if (re.test(text)) hits.push(`keyword:${keyword}`)
-  }
-  return hits
+  res.send(csv)
 }
 
-async function scanContentViolations() {
-  const [rows] = await pool.query(`
-    SELECT ec.sku, ec.store_name, ec.item_id, sm.origin_sku, ap.autods_id, ap.title, ap.description
-    FROM ebay_current ec
-    JOIN sku_map sm
-      ON SUBSTRING(ec.sku, 2) COLLATE utf8mb4_0900_ai_ci = sm.ebay_sku COLLATE utf8mb4_0900_ai_ci
-    JOIN autods_products ap
-      ON sm.origin_sku COLLATE utf8mb4_0900_ai_ci = ap.sku COLLATE utf8mb4_0900_ai_ci
-    WHERE ec.sku LIKE 'A%' AND ec.sku NOT LIKE 'ALX_%' AND ec.sku NOT LIKE 'AZDP_%'
-      AND (ap.title IS NOT NULL OR ap.description IS NOT NULL)
-  `)
-
-  const values = []
-  for (const r of rows) {
-    const titleHits = checkText(r.title).map(h => `title:${h}`)
-    const descHits  = checkText(r.description).map(h => `desc:${h}`)
-    const allHits   = [...titleHits, ...descHits]
-    if (allHits.length) {
-      values.push([
-        r.store_name,
-        r.sku,
-        r.sku,
-        r.origin_sku,
-        r.autods_id,
-        r.item_id,
-        (r.title || '').slice(0, 500),
-        (r.description || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1000),
-        allHits.join(', ')
-      ])
-    }
-  }
-
-  await pool.query('TRUNCATE TABLE content_violation_flags')
-  if (values.length) {
-    const CHUNK = 500
-    for (let i = 0; i < values.length; i += CHUNK) {
-      await pool.query(
-        `INSERT INTO content_violation_flags (store_name, sku, ebay_sku, origin_sku, autods_id, item_id, title, description, reason) VALUES ?`,
-        [values.slice(i, i + CHUNK)]
-      )
-    }
-  }
-  return values.length
-}
-
-function csvRes(res, rows, columns, filename) {
-  const escape = v => {
-    const s = v == null ? '' : String(v)
-    return (s.includes(',') || s.includes('"') || s.includes('\n'))
-      ? `"${s.replace(/"/g, '""')}"`
-      : s
-  }
-  const header = columns.join(',')
-  const body = rows.map(row => columns.map(c => escape(row[c])).join(',')).join('\n')
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
-  res.send(header + '\n' + body)
-}
 // --- Refresh banned_skus_store_cache -----------------------------------------
 async function refreshBannedSkusCache() {
   try {
@@ -427,7 +290,51 @@ app.post('/api/banned-skus', async (req, res) => {
     res.json({ success: true })
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
+app.post('/api/export/sku-lookup', async (req, res) => {
+  try {
+    const { skus } = req.body
+    if (!Array.isArray(skus) || skus.length === 0)
+      return res.status(400).json({ error: 'No SKUs provided' })
 
+    // Build a map: strippedSku -> originalSku
+    // Strip leading 'A' but NOT for AZDP_ prefixed SKUs
+    const skuPairs = skus.map(sku => ({
+      original: sku,
+      stripped: (sku.toUpperCase().startsWith('A') && !sku.toUpperCase().startsWith('AZDP_'))
+        ? sku.slice(1)
+        : sku,
+    }))
+
+    const strippedList = skuPairs.map(p => p.stripped)
+    const placeholders = strippedList.map(() => '?').join(',')
+
+    const [rows] = await pool.query(`
+      SELECT
+        sm.ebay_sku,
+        sm.origin_sku,
+        ap.autods_id
+      FROM sku_map sm
+      LEFT JOIN autods_products ap
+        ON sm.origin_sku COLLATE utf8mb4_0900_ai_ci = ap.sku COLLATE utf8mb4_0900_ai_ci
+      WHERE sm.ebay_sku IN (${placeholders})
+    `, strippedList)
+
+    // Index results by stripped ebay_sku
+    const found = new Map(rows.map(r => [r.ebay_sku, r]))
+
+    const result = skuPairs.map(({ original, stripped }) => {
+      const match = found.get(stripped)
+      if (!match) return { sku: original, origin_sku: null, autods_id: null, not_found: true }
+      return {
+        sku:        original,
+        origin_sku: match.origin_sku  || null,
+        autods_id:  match.autods_id   || null,
+      }
+    })
+
+    res.json(result)
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
 // Bulk import — single SQL insert for up to 500 SKUs at a time1
 app.post('/api/banned-skus/bulk', async (req, res) => {
   try {
@@ -715,7 +622,6 @@ app.get('/api/sync/export-autods-only', async (req, res) => {
         a.autods_id,
         COALESCE(a.price, c.price)           AS price,
         COALESCE(a.stock, c.stock)           AS stock,
-        a.product_status,
         a.inventory_status,
         a.oos_since,
         DATE_FORMAT(COALESCE(a.updated_at, c.updated_at), '%Y-%m-%d %H:%i:%s') AS updated_at
@@ -724,9 +630,10 @@ app.get('/api/sync/export-autods-only', async (req, res) => {
         ON c.sku COLLATE utf8mb4_0900_ai_ci = a.sku COLLATE utf8mb4_0900_ai_ci
       ORDER BY a.stock DESC, a.price ASC
     `)
-    csvRes(res, rows, ['sku','autods_id','price','stock','product_status','inventory_status','oos_since','updated_at'], `autods_not_on_ebay_${new Date().toISOString().slice(0,10)}.csv`)
+    csvRes(res, rows, ['sku','autods_id','price','stock','inventory_status','oos_since','updated_at'], `autods_not_on_ebay_${new Date().toISOString().slice(0,10)}.csv`)
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
+
 // --- EXPORT COUNTS -----------------------------------------------------------
 // All counts come from pre-computed cache tables or ebay_store_stats aggregates
 // to avoid slow full-table scans on ebay_current (no sku index)
@@ -824,22 +731,11 @@ app.get('/api/export/ebay-active', async (req, res) => {
 app.get('/api/export/ebay-oos', async (req, res) => {
   try {
     const [rows] = await pool.query(`
-      SELECT
-        ec.store_name, ec.sku, ec.item_id, ec.price, ec.quantity,
-        sm.origin_sku, ap.autods_id,
-        ap.product_status, ap.inventory_status
-      FROM ebay_current ec
-      LEFT JOIN sku_map sm
-        ON SUBSTRING(ec.sku, 2) COLLATE utf8mb4_0900_ai_ci = sm.ebay_sku COLLATE utf8mb4_0900_ai_ci
-        AND ec.sku LIKE 'A%' AND ec.sku NOT LIKE 'AZDP_%'
-      LEFT JOIN autods_products ap
-        ON sm.origin_sku COLLATE utf8mb4_0900_ai_ci = ap.sku COLLATE utf8mb4_0900_ai_ci
-      WHERE ec.sku LIKE 'A%' AND ec.quantity = 0
-      ORDER BY ec.store_name, ec.sku
-    `)
-    csvRes(res, rows,
-      ['store_name','sku','origin_sku','autods_id','item_id','price','quantity','product_status','inventory_status'],
-      'ebay_amazon_oos.csv')
+      SELECT store_name, sku, item_id, price, quantity
+      FROM ebay_current
+      WHERE sku LIKE 'A%' AND quantity = 0
+      ORDER BY store_name, sku`)
+    csvRes(res, rows, ['store_name','sku','item_id','price','quantity'], 'ebay_amazon_oos.csv')
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
@@ -963,33 +859,25 @@ app.get('/api/export/autods-matched', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
+// AutoDS products not listed on eBay at all
 app.get('/api/export/autods-not-ebay', async (req, res) => {
   try {
-    await keysetCsvExport(
-      res,
-      `SELECT
+    const [rows] = await pool.query(`
+      SELECT
         c.sku,
-        c.sku AS __cursor_key,
         a.autods_id,
         COALESCE(a.price, c.price)           AS price,
         COALESCE(a.stock, c.stock)           AS stock,
-        a.product_status,
         a.inventory_status,
         a.oos_since,
         DATE_FORMAT(COALESCE(a.updated_at, c.updated_at), '%Y-%m-%d %H:%i:%s') AS updated_at
       FROM sync_autods_not_ebay_cache c
       LEFT JOIN autods_products a
         ON c.sku COLLATE utf8mb4_0900_ai_ci = a.sku COLLATE utf8mb4_0900_ai_ci
-      WHERE 1=1`,
-      [],
-      'c.sku',
-      ['sku','autods_id','price','stock','product_status','inventory_status','oos_since','updated_at'],
-      'autods_not_on_ebay.csv'
-    )
-  } catch (e) {
-    if (!res.headersSent) res.status(500).json({ error: e.message })
-    else res.end()
-  }
+      ORDER BY c.sku
+    `)
+    csvRes(res, rows, ['sku','autods_id','price','stock','inventory_status','oos_since','updated_at'], 'autods_not_on_ebay.csv')
+  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 // AZDP listings not updating in AutoDS
 app.get('/api/export/not-updating-azdp', async (req, res) => {
@@ -1355,17 +1243,7 @@ app.post('/api/sync/refresh-all', async (req, res) => {
 
   // 2. summary_cache + stores_summary_cache (pair rates, AutoDS counts per store)
   await run('summary_cache', () => pool.query('CALL refresh_summary_cache()'))
-  await run('content_violations', async () => {
-  results.content_violations_flagged = await scanContentViolations()
-})
-  await run('sync_titles_descriptions', () => pool.query(`
-  UPDATE ebay_current ec
-  JOIN sku_map sm ON SUBSTRING(ec.sku, 2) = sm.ebay_sku
-  JOIN autods_products ap ON sm.origin_sku = ap.sku
-  SET ec.title = ap.title, ec.description = ap.description
-  WHERE ec.sku LIKE 'A%' AND ec.sku NOT LIKE 'ALX_%' AND ec.sku NOT LIKE 'AZDP_%'
-    AND (ec.title IS NULL OR ec.title != ap.title OR ap.updated_at > ec.scraped_at)
-`))
+
   // 3. Rebuild sync_autods_not_ebay_cache
 // 3. Rebuild sync_autods_not_ebay_cache1
 await run('autods_not_ebay_cache', async () => {
@@ -1437,76 +1315,6 @@ await run('banned_skus_cache', async () => {
   `)
 })
   res.json({ success: true, results })
-})
-app.post('/api/content-violations/scan', async (req, res) => {
-  try {
-    const flagged = await scanContentViolations()
-    res.json({ success: true, flagged })
-  } catch (e) { res.status(500).json({ error: e.message }) }
-})
-
-app.get('/api/content-violations', async (req, res) => {
-  try {
-    const { store_name, search, page = 0, limit = 100 } = req.query
-    const offset = parseInt(page) * parseInt(limit)
-    const conditions = []
-    const params = []
-    if (store_name) { conditions.push('store_name = ?'); params.push(store_name) }
-    if (search) { conditions.push('(sku LIKE ? OR title LIKE ?)'); params.push(`%${search}%`, `%${search}%`) }
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
-    const [rows] = await pool.query(
-      `SELECT * FROM content_violation_flags ${where} ORDER BY store_name, sku LIMIT ? OFFSET ?`,
-      [...params, parseInt(limit), offset])
-    const [[{ total }]] = await pool.query(`SELECT COUNT(*) AS total FROM content_violation_flags ${where}`, params)
-    res.json({ data: rows, count: total })
-  } catch (e) { res.status(500).json({ error: e.message }) }
-})
-
-app.get('/api/content-violations/count', async (req, res) => {
-  try {
-    const [[row]] = await pool.query(`
-      SELECT COUNT(*) AS total, COUNT(DISTINCT store_name) AS stores
-      FROM content_violation_flags
-    `)
-    res.json(row)
-  } catch (e) { res.status(500).json({ error: e.message }) }
-})
-
-app.get('/api/content-violations/export', async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT * FROM content_violation_flags ORDER BY store_name, sku')
-    csvRes(res, rows, ['sku','ebay_sku','origin_sku','autods_id','item_id','store_name','title','description','reason','scanned_at'],
-      `content_violations_${new Date().toISOString().slice(0,10)}.csv`)
-  } catch (e) { res.status(500).json({ error: e.message }) }
-})
-
-app.get('/api/banned-keywords', async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT * FROM banned_keywords ORDER BY keyword ASC')
-    res.json(rows)
-  } catch (e) { res.status(500).json({ error: e.message }) }
-})
-
-app.post('/api/banned-keywords', async (req, res) => {
-  try {
-    const { keyword, match_type = 'exact_word' } = req.body
-    if (!keyword?.trim()) return res.status(400).json({ error: 'keyword required' })
-    await pool.query(
-      `INSERT INTO banned_keywords (keyword, match_type) VALUES (?, ?)
-       ON DUPLICATE KEY UPDATE match_type = VALUES(match_type), active = 1`,
-      [keyword.trim().toLowerCase(), match_type]
-    )
-    await loadBannedKeywords()
-    res.json({ success: true })
-  } catch (e) { res.status(500).json({ error: e.message }) }
-})
-
-app.delete('/api/banned-keywords/:id', async (req, res) => {
-  try {
-    await pool.query('DELETE FROM banned_keywords WHERE id = ?', [req.params.id])
-    await loadBannedKeywords()
-    res.json({ success: true })
-  } catch (e) { res.status(500).json({ error: e.message }) }
 })
 // SKU count across all stores (replicates sku_count.py logic)
 app.get('/api/export/sku-count', async (req, res) => {
@@ -1983,10 +1791,25 @@ app.get('/api/active-health/list', async (req, res) => {
 
     const conditions = [condition]
     const params = []
-    if (store_name) { conditions.push('ec.store_name COLLATE utf8mb4_0900_ai_ci = ?'); params.push(store_name) }
+    if (store_name) conditions.push('ec.store_name COLLATE utf8mb4_0900_ai_ci = ?')
     const where = conditions.join(' AND ')
 
     const [rows] = await pool.query(`
+      SELECT ec.store_name, ec.sku, sm.origin_sku, ap.autods_id,
+             ec.item_id, ec.price, ec.quantity,
+             ap.product_status, ap.inventory_status, ap.stock AS autods_stock,
+             ap.oos_since, ap.updated_at AS autods_updated
+      FROM ebay_current ec
+      JOIN sku_map sm ON SUBSTRING(ec.sku, 2) = sm.ebay_sku
+      JOIN autods_products ap ON sm.origin_sku = ap.sku
+      WHERE ec.sku LIKE 'A%' AND ec.sku NOT LIKE 'AZDP_%' AND ec.sku NOT LIKE 'ALX_%'
+        AND ec.quantity > 0
+        AND ${where}
+      ORDER BY ec.store_name, ec.sku
+      LIMIT ? OFFSET ?
+    `, [...params, lim, offset])
+
+       const [rows] = await pool.query(`
       SELECT ec.store_name, ec.sku, sm.origin_sku, ap.autods_id,
              ec.item_id, ec.price, ec.quantity, ap.title,
              ap.product_status, ap.inventory_status, ap.stock AS autods_stock,

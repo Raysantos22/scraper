@@ -43,34 +43,46 @@ export default function BannedSkusPage({ onBack, initialStore }) {
   const [importing,      setImporting]      = useState(false)
   const [importResult,   setImportResult]   = useState(null)
   const [importProgress, setImportProgress] = useState(null)
+  const [violations,      setViolations]      = useState([])
+const [violationCount,  setViolationCount]  = useState({ total: 0, stores: 0 })
+const [scanning,        setScanning]        = useState(false)
+const [keywords,        setKeywords]        = useState([])
+const [newKeyword,      setNewKeyword]      = useState('')
+const [addingKeyword,   setAddingKeyword]   = useState(false)
   const fileInputRef = useRef(null)
 
   async function loadAll(force = false) {
-    if (!force && CACHE.banned && Date.now() - CACHE.ts < STALE_MS) return
-    if (!CACHE.banned) setLoading(true)
-    setError(null)
-    try {
-      const [data, autodsData] = await Promise.all([
-        api.get('/api/banned-skus/combined'),
-        api.get('/api/banned-skus/autods'),
-      ])
-      if (data) {
-        CACHE.banned = data.banned
-        CACHE.live   = data.live
-        CACHE.ts     = Date.now()
-        setBanned(data.banned)
-        setLive(data.live)
-      }
-      if (Array.isArray(autodsData)) {
-        CACHE.autods = autodsData
-        setAutods(autodsData)
-      }
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setLoading(false)
+  if (!force && CACHE.banned && Date.now() - CACHE.ts < STALE_MS) return
+  if (!CACHE.banned) setLoading(true)
+  setError(null)
+  try {
+    const [data, autodsData, violationData, countData, keywordData] = await Promise.all([
+      api.get('/api/banned-skus/combined'),
+      api.get('/api/banned-skus/autods'),
+      api.get('/api/content-violations?limit=500'),
+      api.get('/api/content-violations/count'),
+      api.get('/api/banned-keywords'),
+    ])
+    if (data) {
+      CACHE.banned = data.banned
+      CACHE.live   = data.live
+      CACHE.ts     = Date.now()
+      setBanned(data.banned)
+      setLive(data.live)
     }
+    if (Array.isArray(autodsData)) {
+      CACHE.autods = autodsData
+      setAutods(autodsData)
+    }
+    if (violationData) setViolations(violationData.data || [])
+    if (countData) setViolationCount(countData)
+    if (Array.isArray(keywordData)) setKeywords(keywordData)
+  } catch (e) {
+    setError(e.message)
+  } finally {
+    setLoading(false)
   }
+}
 
   useEffect(() => { loadAll() }, [])
 
@@ -95,6 +107,49 @@ export default function BannedSkusPage({ onBack, initialStore }) {
     }
   }
 
+
+// New handlers
+async function handleScan() {
+  setScanning(true)
+  try {
+    await fetch(`${BASE_URL}/api/content-violations/scan`, { method: 'POST' })
+    CACHE.ts = 0
+    await loadAll(true)
+  } catch (e) { setError(e.message) } finally { setScanning(false) }
+}
+
+async function handleAddKeyword() {
+  if (!newKeyword.trim()) return
+  setAddingKeyword(true)
+  try {
+    await fetch(`${BASE_URL}/api/banned-keywords`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keyword: newKeyword.trim(), match_type: 'exact_word' }),
+    })
+    setNewKeyword('')
+    const data = await api.get('/api/banned-keywords')
+    if (Array.isArray(data)) setKeywords(data)
+  } catch (e) { setError(e.message) } finally { setAddingKeyword(false) }
+}
+
+async function handleDeleteKeyword(id) {
+  try {
+    await fetch(`${BASE_URL}/api/banned-keywords/${id}`, { method: 'DELETE' })
+    setKeywords(k => k.filter(kw => kw.id !== id))
+  } catch (e) { setError(e.message) }
+}
+
+function handleExportViolations() {
+  if (downloadingViolations) return
+  setDownloadingViolations(true)
+  const a = document.createElement('a')
+  a.href = `${BASE_URL}/api/content-violations/export`
+  a.download = `content_violations_${new Date().toISOString().slice(0,10)}.csv`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => setDownloadingViolations(false), 4000)
+}
   async function handleDelete(sku) {
     setDeleting(d => ({ ...d, [sku]: true }))
     try {
@@ -210,6 +265,7 @@ export default function BannedSkusPage({ onBack, initialStore }) {
 
   const affectedStores    = [...new Set(live.map(l => l.store_name))]
   const autodsWithStock   = autods.filter(a => a.stock > 0).length
+  const [downloadingViolations, setDownloadingViolations] = useState(false)
 
   return (
     <div className="p-6 space-y-5">
@@ -411,6 +467,10 @@ export default function BannedSkusPage({ onBack, initialStore }) {
             className={`px-4 py-1.5 text-xs font-medium transition-colors ${tab === 'all' ? 'bg-foreground text-background' : 'bg-card text-muted-foreground hover:text-foreground'}`}>
             All Banned ({loading ? '…' : banned.length})
           </button>
+          <button onClick={() => setTab('violations')}
+  className={`px-4 py-1.5 text-xs font-medium transition-colors ${tab === 'violations' ? 'bg-purple-500 text-white' : 'bg-card text-muted-foreground hover:text-foreground'}`}>
+  Content Flags {violationCount.total > 0 && <span className="ml-1 bg-white/20 px-1 rounded">{fmt(violationCount.total)}</span>}
+</button>
         </div>
       </div>
 
@@ -539,7 +599,104 @@ export default function BannedSkusPage({ onBack, initialStore }) {
           </CardContent>
         </Card>
       )}
+{tab === 'violations' && (
+  <div className="space-y-4">
+    {/* Keyword management */}
+    <Card>
+      <CardContent className="pt-4 pb-4 space-y-3">
+        <p className="text-xs font-semibold">Banned Keywords ({keywords.length})</p>
+        <div className="flex gap-2">
+          <input type="text" value={newKeyword} onChange={e => setNewKeyword(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleAddKeyword()}
+            placeholder="Add a keyword (e.g. whatsapp, telegram)…"
+            className="flex-1 px-3 py-1.5 text-sm bg-muted/50 border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-ring" />
+          <button onClick={handleAddKeyword} disabled={addingKeyword || !newKeyword.trim()}
+            className="flex items-center gap-1.5 text-sm bg-purple-500 hover:bg-purple-600 text-white rounded-lg px-4 py-1.5 transition-colors disabled:opacity-50 font-medium">
+            <Plus size={13} />{addingKeyword ? 'Adding…' : 'Add'}
+          </button>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {keywords.map(kw => (
+            <span key={kw.id} className="flex items-center gap-1 text-xs bg-muted px-2 py-1 rounded-full">
+              {kw.keyword}
+              <button onClick={() => handleDeleteKeyword(kw.id)} className="text-muted-foreground hover:text-red-500">
+                <X size={10} />
+              </button>
+            </span>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
 
+    {/* Scan results */}
+    <Card>
+      <CardHeader className="pb-2 pt-4 px-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle className="text-sm">Content Violation Flags</CardTitle>
+            <CardDescription className="text-xs">
+              {violationCount.total > 0
+                ? `${fmt(violationCount.total)} listings flagged across ${violationCount.stores} stores — review, not auto-banned`
+                : 'No flags — run a scan to check titles/descriptions'}
+            </CardDescription>
+          </div>
+          <div className="flex gap-2">
+            <button onClick={handleScan} disabled={scanning}
+              className="flex items-center gap-1.5 text-xs bg-purple-500 hover:bg-purple-600 text-white rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50">
+              <RefreshCw size={11} className={scanning ? 'animate-spin' : ''} />{scanning ? 'Scanning…' : 'Run Scan'}
+            </button>
+            <button onClick={handleExportViolations} disabled={violations.length === 0 || downloadingViolations}
+              className="flex items-center gap-1.5 text-xs border border-border rounded-lg px-3 py-1.5 hover:bg-muted/40 disabled:opacity-50">
+              <Download size={11} className={downloadingViolations ? 'animate-pulse' : ''} />
+              {downloadingViolations ? 'Exporting…' : 'Export'}
+            </button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="p-0">
+        {violations.length === 0 ? (
+          <div className="p-10 text-center">
+            <ShieldCheck size={24} className="text-muted-foreground/30 mx-auto mb-2" />
+            <p className="text-sm text-muted-foreground">No flags yet</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+            <table className="w-full text-xs">
+<thead className="sticky top-0 bg-card">
+  <tr className="border-b border-border bg-muted/30">
+    {['Store','SKU','Origin SKU','AutoDS ID','Item ID','Title','Description','Flags'].map(h => (
+      <th key={h} className="text-left px-3 py-2 font-semibold text-muted-foreground whitespace-nowrap">{h}</th>
+    ))}
+  </tr>
+</thead>
+<tbody>
+  {violations.map((row, i) => (
+    <tr key={i} className="border-b border-border/50 hover:bg-purple-50/30 transition-colors">
+      <td className="px-3 py-2 font-medium capitalize whitespace-nowrap">{row.store_name}</td>
+      <td className="px-3 py-2 font-mono text-purple-600 whitespace-nowrap">{row.sku}</td>
+      <td className="px-3 py-2 font-mono text-gray-500 whitespace-nowrap">{row.origin_sku || '—'}</td>
+      <td className="px-3 py-2 font-mono text-gray-500 whitespace-nowrap">{row.autods_id || '—'}</td>
+      <td className="px-3 py-2 whitespace-nowrap">
+        {row.item_id ? (
+          <a href={`https://www.ebay.com.au/itm/${row.item_id}`} target="_blank" rel="noreferrer"
+            className="text-blue-500 hover:underline font-mono">{row.item_id}</a>
+        ) : '—'}
+      </td>
+      <td className="px-3 py-2 text-muted-foreground max-w-xs truncate" title={row.title}>{row.title}</td>
+      <td className="px-3 py-2 text-muted-foreground max-w-sm truncate" title={row.description}>{row.description}</td>
+      <td className="px-3 py-2">
+        <span className="text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded">{row.reason}</span>
+      </td>
+    </tr>
+  ))}
+</tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  </div>
+)}
       {/* All banned tab */}
       {tab === 'all' && (
         <Card>

@@ -21,6 +21,7 @@ import StoreListingsPage from '../ebay/StoreListingsPage'
 import BannedSkusPage    from '../ebay/BannedSkusPage'
 import SkuLookupPage     from '../ebay/SkuLookupPage'
 import StoreLimitsPage   from '../ebay/StoreLimitsPage'
+import ActiveHealthPage from '../ebay/ActiveHealthPage'
 
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
@@ -632,7 +633,8 @@ const EXPORT_GROUPS = [
       { id: 'ebay-oos-supplier',     label: 'Supplier OOS',         icon: PackageX,     iconColor: 'text-orange-400', url: `${BASE_URL}/api/export/ebay-oos-supplier`,      filename: 'ebay_supplier_oos.csv' },
       { id: 'ebay-active-no-autods', label: 'Active — No AutoDS',   icon: ZapOff,       iconColor: 'text-orange-500', url: `${BASE_URL}/api/export/ebay-active-no-autods`,  filename: 'ebay_active_no_autods.csv' },
       { id: 'ebay-dead-no-autods',   label: 'OOS — No AutoDS',      icon: ListX,        iconColor: 'text-rose-500',   url: `${BASE_URL}/api/export/ebay-oos-no-autods`,     filename: 'ebay_oos_no_autods.csv' },
-      { id: 'ebay-no-autods',        label: 'All — No AutoDS',      icon: AlertCircle,  iconColor: 'text-amber-500',  url: `${BASE_URL}/api/export/ebay-no-autods`,          filename: 'ebay_not_in_autods.csv' },
+      { id: 'ebay-no-autods',        label: 'All — No AutoDS',      icon: AlertCircle,  iconColor: 'text-amber-500',  url: `${BASE_URL}/api/export/ebay-no-autods`,         filename: 'ebay_not_in_autods.csv' },
+      { id: 'missing-asins',         label: 'Missing ASINs',        icon: AlertCircle,  iconColor: 'text-red-500',    url: `${BASE_URL}/api/export/missing-asins`,          filename: `missing_asins_${new Date().toISOString().slice(0,10)}.csv`},
     ],
   },
   {
@@ -653,6 +655,16 @@ const EXPORT_GROUPS = [
       { id: 'nonamazon-unlisted', label: 'Non-Amazon Never Listed', icon: TrendingUp,   iconColor: 'text-purple-500', url: `${BASE_URL}/api/export/nonamazon-unlisted`,       filename: 'nonamazon_never_listed.csv', hintText: '~81k rows' },
     ],
   },
+{
+  title: 'Active Health',
+  headerText: 'text-rose-700',
+  exports: [
+    { id: 'active-truly-healthy',   label: 'Truly Healthy',   icon: CheckCircle2, iconColor: 'text-green-500',  url: `${BASE_URL}/api/export/active-truly-healthy`,   filename: 'active_truly_healthy.csv',   summaryKey: 'active_truly_healthy'   },
+    { id: 'active-autods-inactive', label: 'AutoDS Inactive', icon: ZapOff,       iconColor: 'text-red-500',    url: `${BASE_URL}/api/export/active-autods-inactive`, filename: 'active_autods_inactive.csv', summaryKey: 'active_autods_inactive' },
+    { id: 'active-autods-oos',      label: 'AutoDS OOS',      icon: PackageX,     iconColor: 'text-orange-500', url: `${BASE_URL}/api/export/active-autods-oos`,      filename: 'active_autods_oos.csv',      summaryKey: 'active_autods_oos'      },
+    { id: 'active-autods-onhold',   label: 'On Hold',         icon: Clock,        iconColor: 'text-amber-500',  url: `${BASE_URL}/api/export/active-autods-onhold`,   filename: 'active_autods_onhold.csv',   summaryKey: 'active_autods_onhold'   },
+  ],
+},
 ]
 
 function ExportSection({ summary, loading }) {
@@ -660,12 +672,12 @@ function ExportSection({ summary, loading }) {
   const [errors,      setErrors]      = useState({})
   const [counts,      setCounts]      = useState({})
 
-  useEffect(() => {
-    fetch(`${BASE_URL}/api/export/counts`)
-      .then(r => r.json())
-      .then(d => { if (!d.error) setCounts(d) })
-      .catch(() => {})
-  }, [])
+useEffect(() => {
+  fetch(`${BASE_URL}/api/export/counts`)
+    .then(r => r.json())
+    .then(d => { if (!d.error) setCounts(d) })
+    .catch(() => {})
+}, [])
 
   async function handleDownload(exp) {
     setDownloading(d => ({ ...d, [exp.id]: true }))
@@ -697,7 +709,7 @@ function ExportSection({ summary, loading }) {
   return (
     <Card>
       <CardContent className="p-0">
-        <div className="grid grid-cols-3 divide-x divide-border">
+        <div className="grid grid-cols-4 divide-x divide-border">
           {EXPORT_GROUPS.map(group => (
             <div key={group.title} className="px-3 py-2">
               <p className={`text-[9px] font-bold uppercase tracking-widest mb-1 ${group.headerText}`}>
@@ -753,7 +765,7 @@ function ExportSection({ summary, loading }) {
 function FilterBar({
   search, onSearch, supplierFilter, onSupplierFilter, stockFilter, onStockFilter,
   resultCount, totalCount, onSkuLookup, onRefresh, refreshing, onLimitsPage,
-  onSkuCount, skuCountLoading,   // ← add these
+  onSkuCount, skuCountLoading, onActiveHealth,
 }) {
   const hasFilters = search || supplierFilter || stockFilter
   return (
@@ -836,6 +848,15 @@ function FilterBar({
           <ChevronRight size={11} className="text-muted-foreground/50 group-hover:text-blue-400 transition-colors" />
         </button>
         {/* SKU Count Download */}
+        {/* Active Health */}
+        <button
+          onClick={onActiveHealth}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-border rounded-lg bg-muted/30 hover:bg-rose-50 hover:border-rose-300 hover:text-rose-600 transition-all group"
+        >
+          <CheckCircle2 size={12} className="text-muted-foreground group-hover:text-rose-500 transition-colors" />
+          Active Health
+          <ChevronRight size={11} className="text-muted-foreground/50 group-hover:text-rose-400 transition-colors" />
+        </button>
 <button
   onClick={onSkuCount}
   disabled={skuCountLoading}
@@ -875,6 +896,7 @@ export default function StoresTab() {
   const [bannedAutodsTotal,     setBannedAutodsTotal]     = useState(0)
   const [bannedAutodsWithStock, setBannedAutodsWithStock] = useState(0)
   const [skuCountLoading, setSkuCountLoading] = useState(false)
+  const [showActiveHealth, setShowActiveHealth] = useState(false)
 
 
   useEffect(() => {
@@ -971,7 +993,6 @@ async function handleSkuCount() {
       setRefreshing(false)
     }
   }
-
   const filteredStores = useMemo(() => stores.filter(store => {
     if (search && !store.store_name.toLowerCase().includes(search.toLowerCase())) return false
     if (supplierFilter && Number(store[supplierFilter] || 0) === 0) return false
@@ -1003,6 +1024,7 @@ const activeStoreCount = stores.filter(s => Number(s.total_items || 0) > 0).leng
   if (showBanned)     return <BannedSkusPage initialStore={bannedStore} onBack={() => { setShowBanned(false); setBannedStore(null); STORES_CACHE.ts = 0 }} />
   if (showSkuLookup)  return <SkuLookupPage onBack={() => setShowSkuLookup(false)} />
   if (showLimitsPage) return <StoreLimitsPage onBack={() => setShowLimitsPage(false)} />
+  if (showActiveHealth) return <ActiveHealthPage onBack={() => setShowActiveHealth(false)} summary={summary} />
 
   return (
     <div className="p-6 space-y-6">
@@ -1034,7 +1056,22 @@ const activeStoreCount = stores.filter(s => Number(s.total_items || 0) > 0).leng
   loading={loading}
   compact
 />          <SummaryCard label="Amazon on eBay"    value={amazonTotal}   trendLabel="Amazon SKUs on eBay"         subLabel="A-prefix and AZDP listings"    loading={loading} compact />
-          <SummaryCard label="AutoDS Products"   value={autodsTotal}   trendLabel="ASINs monitored"             subLabel="In AutoDS monitoring"          loading={loading} compact />
+          {/* <SummaryCard label="AutoDS Products"   value={autodsTotal}   trendLabel="ASINs monitored"             subLabel="In AutoDS monitoring"          loading={loading} compact /> */}
+<SummaryCard
+  label="AutoDS Products"
+  value={autodsTotal}
+  trendLabel={
+    <>
+      <span className="text-green-600">{fmt(Number(summary?.paired_status2 || 0))} paired</span>
+      {' · '}
+      <span className="text-red-500">{fmt(Number(summary?.paired_status3 || 0))} inactive</span>
+    </>
+  }
+  subLabel="Active + Inactive SKUs"
+  accent="#000000"
+  loading={loading}
+  compact
+/>
           <SummaryCard label="eBay + AutoDS"     value={paired}        trendLabel={`${pairedPct}% pair rate`}   subLabel="Amazon listings monitored"     accent="#22c55e"  loading={loading} compact />
           <SummaryCard label="Not Updating"      value={notUpdating}   trendLabel="need to be updated"          subLabel="No AutoDS monitoring"          accent="#ef4444"  loading={loading} compact />
           <div onClick={() => setShowBanned(true)} className="cursor-pointer col-span-2 sm:col-span-1">
@@ -1073,7 +1110,7 @@ const activeStoreCount = stores.filter(s => Number(s.total_items || 0) > 0).leng
                 Stores <span className="opacity-50">({stores.length})</span>
               </p>
               {!loading && (
-                <FilterBar
+                    <FilterBar
                   search={search}                 onSearch={setSearch}
                   supplierFilter={supplierFilter} onSupplierFilter={setSupplierFilter}
                   stockFilter={stockFilter}       onStockFilter={setStockFilter}
@@ -1084,6 +1121,7 @@ const activeStoreCount = stores.filter(s => Number(s.total_items || 0) > 0).leng
                   skuCountLoading={skuCountLoading}
                   onRefresh={handleRefresh}
                   refreshing={refreshing}
+                  onActiveHealth={() => setShowActiveHealth(true)}
                 />
               )}
             </div>
