@@ -1,7 +1,10 @@
 require('dotenv').config()
+const { execFile } = require('child_process')
 const express = require('express')
 const cors    = require('cors')
 const mysql   = require('mysql2/promise')
+const fs      = require('fs')      // ← add this
+const path    = require('path')    // ← add this
 
 const app = express()
 app.use(cors({
@@ -24,6 +27,9 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit:    10,
 })
+
+const SKU_LOOKUP_THRESHOLD = 200
+const PRICE_RUNS_DIR = '/home/emega/client/ozhair/scraper/creatorsapi-python-sdk/examples'
 
 function buildWhere(query) {
   const { search, category, stock, supplier_id, minQty, minPrice, maxPrice, freshness, override, uploaded } = query
@@ -75,7 +81,7 @@ function buildWhere(query) {
 // --- CONTENT VIOLATION SCAN (title + description of paired eBay/AutoDS items) -
 
 
-// --- KEYSET-PAGINATED CSV (fast at any depth — no OFFSET, no full-scan-and-discard) ---
+// --- KEYSET-PAGINATED CSV (fast at any depth ï¿½ no OFFSET, no full-scan-and-discard) ---
 function csvEscape(v) {
   const s = v == null ? '' : String(v)
   return (s.includes(',') || s.includes('"') || s.includes('\n'))
@@ -84,7 +90,7 @@ function csvEscape(v) {
 }
 
 // baseSql must select a `cursor_key` column (usually the sku/order column) and
-// must NOT include its own ORDER BY/LIMIT — those are added here.
+// must NOT include its own ORDER BY/LIMIT ï¿½ those are added here.
 // cursorCol is the raw column expression used for keyset comparison, e.g. 'c.sku'
 async function keysetCsvExport(res, baseSql, params, cursorCol, columns, filename, batchSize = 5000) {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8')
@@ -224,10 +230,14 @@ function csvRes(res, rows, columns, filename) {
 }
 // --- Refresh banned_skus_store_cache -----------------------------------------
 async function refreshBannedSkusCache() {
+  const conn = await pool.getConnection()
   try {
-    await pool.query('TRUNCATE TABLE banned_skus_on_ebay')
-    await pool.query(`
-      INSERT INTO banned_skus_on_ebay
+    // --- eBay-live banned cache: build into a shadow table, then atomic swap ---
+    await conn.query('DROP TABLE IF EXISTS banned_skus_on_ebay_new')
+    await conn.query('CREATE TABLE banned_skus_on_ebay_new LIKE banned_skus_on_ebay')
+
+    await conn.query(`
+      INSERT INTO banned_skus_on_ebay_new
       SELECT * FROM (
         SELECT ec.store_name,ec.sku,ec.item_id,ec.price,ec.quantity,bs.sku AS banned_sku,
           COALESCE(sm.origin_sku,ec.group_sku,ec.sku) AS origin_sku,
@@ -252,17 +262,29 @@ async function refreshBannedSkusCache() {
         LEFT JOIN autods_products ap ON ap.sku=sm.origin_sku COLLATE utf8mb4_0900_ai_ci
       ) t
     `)
-    await pool.query('DELETE FROM banned_skus_store_cache')
-    await pool.query(`
+
+    await conn.query('DROP TABLE IF EXISTS banned_skus_on_ebay_old')
+    await conn.query(`
+      RENAME TABLE
+        banned_skus_on_ebay     TO banned_skus_on_ebay_old,
+        banned_skus_on_ebay_new TO banned_skus_on_ebay
+    `)
+    await conn.query('DROP TABLE IF EXISTS banned_skus_on_ebay_old')
+
+    // --- Per-store counts, derived from the table we just swapped in ---
+    await conn.query('DELETE FROM banned_skus_store_cache')
+    await conn.query(`
       INSERT INTO banned_skus_store_cache (store_name, banned_count)
       SELECT store_name, COUNT(*) FROM banned_skus_on_ebay
       GROUP BY store_name
       ON DUPLICATE KEY UPDATE banned_count=VALUES(banned_count), updated_at=NOW()
     `)
-    // Rebuild AutoDS banned cache
-    await pool.query('TRUNCATE TABLE banned_autods_cache')
-    await pool.query(`
-      INSERT INTO banned_autods_cache
+
+    // --- AutoDS-side banned cache: same shadow-swap pattern ---
+    await conn.query('DROP TABLE IF EXISTS banned_autods_cache_new')
+    await conn.query('CREATE TABLE banned_autods_cache_new LIKE banned_autods_cache')
+    await conn.query(`
+      INSERT INTO banned_autods_cache_new
       SELECT ap.sku, ap.autods_id, ap.price, ap.stock,
         ap.inventory_status, ap.is_active,
         bs.reason, bs.added_at, ap.updated_at
@@ -270,9 +292,186 @@ async function refreshBannedSkusCache() {
       JOIN banned_skus bs ON ap.sku = bs.sku COLLATE utf8mb4_0900_ai_ci
       WHERE ap.is_active = 1
     `)
+    await conn.query('DROP TABLE IF EXISTS banned_autods_cache_old')
+    await conn.query(`
+      RENAME TABLE
+        banned_autods_cache     TO banned_autods_cache_old,
+        banned_autods_cache_new TO banned_autods_cache
+    `)
+    await conn.query('DROP TABLE IF EXISTS banned_autods_cache_old')
+
+    console.log('refreshBannedSkusCache: completed OK')
   } catch (e) {
     console.error('refreshBannedSkusCache error:', e.message)
+    console.error(e.stack)
+    // Don't leave half-built shadow tables lying around blocking the next run
+    try {
+      await conn.query('DROP TABLE IF EXISTS banned_skus_on_ebay_new')
+      await conn.query('DROP TABLE IF EXISTS banned_autods_cache_new')
+    } catch (_) {}
+    throw e   // propagate — callers must know this failed, not swallow it
+  } finally {
+    conn.release()
   }
+}
+// -----------------------------------------------------------------------------
+// ADD PRODUCT (by ASIN via Amazon Creators API) ï¿½ paste into server.js
+// Put this block anywhere in the PRODUCTS section, e.g. right after the
+// existing `app.get('/api/products/:id', ...)` route and before
+// `app.put('/api/products/:id', ...)`.
+//
+// Requires at the top of server.js (add next to your other requires):
+//   const { execFile } = require('child_process')
+// -----------------------------------------------------------------------------
+
+// fetch_single_product.py lives in the same folder as the working
+// sample_get_items_urbanvista1.py ï¿½ this is the folder where
+// `sys.path.append('..')` correctly resolves to creatorsapi_python_sdk.
+const ADD_PRODUCT_SCRIPT = '/home/emega/client/ozhair/scraper/creatorsapi-python-sdk/examples/fetch_single_product.py'
+
+// Must use the venv's python3 ï¿½ this is where pydantic/dateutil/etc are
+// actually installed, NOT the system python3.
+const PYTHON_BIN = '/home/emega/client/ozhair/scraper/ozhair/venv/bin/python3'
+
+// Parses "name1:value1 | name2:value2" into [{name, value}, ...] pairs.
+// Splits each pair on the FIRST colon only, since values can contain their
+// own colons (e.g. "color_name:A: Grey/Beige").
+function parseVariationAttrs(attrString) {
+  const options = []
+  if (!attrString) return options
+  const pairs = attrString.split(' | ')
+  for (const pair of pairs) {
+    const idx = pair.indexOf(':')
+    if (idx === -1) continue
+    const name = pair.slice(0, idx).trim()
+    const value = pair.slice(idx + 1).trim()
+    options.push({ name, value })
+  }
+  return options
+}
+
+// POST /api/products/add   { asin, supplier_id }
+// Which Amazon account is used to fetch is picked automatically inside
+// fetch_single_product.py ï¿½ no dropdown needed for that on the frontend.
+app.post('/api/products/add', async (req, res) => {
+  const { asin, supplier_id } = req.body || {}
+
+  if (!asin || !supplier_id) {
+    return res.status(400).json({ error: 'asin and supplier_id are required' })
+  }
+  if (!/^[A-Z0-9]{10}$/i.test(asin.trim())) {
+    return res.status(400).json({ error: 'ASIN looks invalid (expected 10 alphanumeric chars)' })
+  }
+
+  let fetched
+  try {
+    fetched = await runAddProductScript(asin.trim())
+  } catch (err) {
+    console.error('fetch_single_product.py failed:', err.message)
+    return res.status(502).json({ error: err.message || 'Failed to fetch product from Amazon' })
+  }
+
+  try {
+    const [existing] = await pool.query(
+      'SELECT product_id FROM products WHERE sku = ? LIMIT 1',
+      [fetched.sku]
+    )
+    if (existing.length) {
+      return res.status(409).json({
+        error: 'Product with this SKU already exists',
+        product_id: existing[0].product_id,
+      })
+    }
+
+    const [result] = await pool.query(
+      `INSERT INTO products
+         (sku, title, brand, price, stock, images, description, product_url, category, metadata, supplier_id, product_type, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+      [
+        fetched.sku,
+        fetched.title,
+        fetched.brand || null,
+        fetched.price,
+        fetched.stock,
+        JSON.stringify(fetched.images),
+        fetched.description || null,
+        fetched.detail_page_url || null,
+        fetched.category || null,
+        JSON.stringify(fetched.metadata || {}),
+        supplier_id,
+        fetched.product_type || 'simple',
+      ]
+    )
+
+    // Insert variant siblings, if this ASIN turned out to be a variation parent.
+    if (Array.isArray(fetched.variants) && fetched.variants.length) {
+      for (const v of fetched.variants) {
+        const opts = parseVariationAttrs(v.variation_attributes)
+        const variantMetadata = {
+          condition: v.condition || '',
+          merchant_name: v.merchant_name || '',
+          dimensions: {
+            length: v.item_length || '',
+            width: v.item_width || '',
+            height: v.item_height || '',
+            unit: v.item_length_unit || '',
+          },
+          category: v.category || '',
+          description: v.description || '',
+          detail_page_url: v.detail_page_url || '',
+          brand: v.brand || '',
+        }
+        await pool.query(
+          `INSERT INTO variants
+             (product_id, variant_sku, variant_name, price, stock, images,
+              option1_name, option1_value, option2_name, option2_value, option3_name, option3_value,
+              metadata, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+          [
+            result.insertId,
+            v.sku,
+            v.title || null,
+            v.price,
+            v.stock,
+            JSON.stringify(v.images || []),
+            opts[0]?.name || null, opts[0]?.value || null,
+            opts[1]?.name || null, opts[1]?.value || null,
+            opts[2]?.name || null, opts[2]?.value || null,
+            JSON.stringify(variantMetadata),
+          ]
+        )
+      }
+    }
+
+    const [[newRow]] = await pool.query('SELECT * FROM products WHERE product_id = ?', [result.insertId])
+    return res.status(201).json(newRow)
+  } catch (err) {
+    console.error('Add product DB insert failed:', err.message)
+    return res.status(500).json({ error: 'Fetched product but failed to save it to the database' })
+  }
+})
+
+function runAddProductScript(asin) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      PYTHON_BIN,
+      [ADD_PRODUCT_SCRIPT, '--asin', asin],
+      { timeout: 30_000 },
+      (err, stdout, stderr) => {
+        if (stderr) console.log('[fetch_single_product.py]', stderr.trim())
+
+        if (err) {
+          const lastLine = stderr.trim().split('\n').pop() || 'Script failed'
+          return reject(new Error(lastLine.replace(/^ERROR:\s*/, '')))
+        }
+        try {
+          resolve(JSON.parse(stdout.trim()))
+        } catch {
+          reject(new Error('Could not parse product data from script output'))
+        }
+      }
+    )
+  })
 }
 // --- SYNC LAST-SYNCED --------------------------------------------------------
 app.get('/api/sync/last-synced', async (req, res) => {
@@ -411,11 +610,10 @@ app.get('/api/banned-skus/export', async (req, res) => {
 
 app.post('/api/banned-skus/refresh-cache', async (req, res) => {
   try {
-    await refreshBannedSkusCache()
-    res.json({ success: true, message: 'Banned SKUs cache refreshed' })
+    await refreshBannedSkusCache()   // never throws — the function already caught its own error
+    res.json({ success: true, message: 'Banned SKUs cache refreshed' })  // always fires
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
-
 app.post('/api/banned-skus', async (req, res) => {
   try {
     const { sku, reason } = req.body
@@ -428,7 +626,7 @@ app.post('/api/banned-skus', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
 
-// Bulk import — single SQL insert for up to 500 SKUs at a time1
+// Bulk import ï¿½ single SQL insert for up to 500 SKUs at a time1
 app.post('/api/banned-skus/bulk', async (req, res) => {
   try {
     const { items } = req.body // [{ sku, reason }, ...]
@@ -740,7 +938,7 @@ app.get('/api/export/counts', async (req, res) => {
       [storeRows],
     ] = await Promise.all([
       pool.query('SELECT * FROM summary_cache WHERE id = 1'),
-      // Pull amazon vs supplier active/oos from ebay_store_stats (instant — 53 rows)
+      // Pull amazon vs supplier active/oos from ebay_store_stats (instant ï¿½ 53 rows)
       pool.query(`
         SELECT
           SUM(active_listings)                         AS total_active,
@@ -792,7 +990,7 @@ app.get('/api/export/counts', async (req, res) => {
       'ebay-active-no-autods':     notUpd,
       'ebay-dead-no-autods':       oosNoAutods,
       'ebay-no-autods':            notMonitored,
-      // AutoDS — READ FROM SUMMARY_CACHE, NOT FROM CACHE TABLE
+      // AutoDS ï¿½ READ FROM SUMMARY_CACHE, NOT FROM CACHE TABLE
       'autods-matched':            paired,
       'autods-all':                autodsTotal,
       'autods-not-ebay':           Number(cache.not_on_ebay || 0),  // ? Changed: now reads from SP
@@ -1051,6 +1249,33 @@ app.get('/api/suppliers', async (req, res) => {
     res.json(rows)
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
+app.post('/api/suppliers', async (req, res) => {
+  try {
+    const { supplier_name } = req.body || {}
+    const name = supplier_name?.trim()
+    if (!name) return res.status(400).json({ error: 'supplier_name is required' })
+ 
+    // Avoid dupes (case-insensitive) ï¿½ if "Amazon AU" already exists, return it
+    // instead of creating a second row.
+    const [existing] = await pool.query(
+      'SELECT * FROM suppliers WHERE LOWER(supplier_name) = LOWER(?) LIMIT 1',
+      [name]
+    )
+    if (existing.length) return res.status(200).json(existing[0])
+ 
+    const [result] = await pool.query(
+      'INSERT INTO suppliers (supplier_name) VALUES (?)',
+      [name]
+    )
+    const [[newRow]] = await pool.query(
+      'SELECT * FROM suppliers WHERE supplier_id = ?',
+      [result.insertId]
+    )
+    res.status(201).json(newRow)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
 
 // --- PRODUCTS ----------------------------------------------------------------
 app.get('/api/products/categories', async (req, res) => {
@@ -1182,7 +1407,7 @@ app.get('/api/product-overrides/:sku', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
 // -----------------------------------------------------------------------------
-// STORE LIMITS — paste these routes into server.js
+// STORE LIMITS ï¿½ paste these routes into server.js
 // (add them anywhere before the SERVER section at the bottom)
 // -----------------------------------------------------------------------------
 
@@ -1570,7 +1795,7 @@ app.get('/api/export/sku-count', async (req, res) => {
     res.status(500).json({ error: e.message })
   }
 })
-// Bulk override fetch — replaces N individual /product-overrides/:sku calls
+// Bulk override fetch ï¿½ replaces N individual /product-overrides/:sku calls
 app.post('/api/product-overrides/bulk-get', async (req, res) => {
   try {
     const { skus } = req.body
@@ -1590,47 +1815,111 @@ app.post('/api/export/sku-lookup', async (req, res) => {
     const { skus } = req.body
     if (!Array.isArray(skus) || skus.length === 0)
       return res.status(400).json({ error: 'No SKUs provided' })
-
-    const placeholders = skus.map(() => '?').join(',')
-
-    // Strip leading 'A' for sku_map lookup (ebay_sku stored without prefix)
-    const strippedSkus = skus.map(s => s.replace(/^A(?!ZDP_)/i, ''))
-
-    const [rows] = await pool.query(`
-      SELECT
-        sm.ebay_sku,
-        sm.origin_sku,
-        ap.autods_id
-      FROM sku_map sm
-      LEFT JOIN autods_products ap
-        ON sm.origin_sku COLLATE utf8mb4_0900_ai_ci = ap.sku COLLATE utf8mb4_0900_ai_ci
-      WHERE sm.ebay_sku IN (${placeholders})
-    `, strippedSkus)
-
-    // Map results back to original SKUs (re-add the 'A' prefix)1
-    const found = new Map(rows.map(r => ['A' + r.ebay_sku, r]))
-
+ 
+    // Hard cap per batch ï¿½ tell frontend to chunk if it didn't
+    if (skus.length > 5000)
+      return res.status(400).json({ error: 'Max 5000 SKUs per request. Use client-side batching.' })
+ 
+    // Strip leading 'A' for sku_map lookup (stored without prefix),
+    // but leave non-A SKUs (PL_, OZH_, etc.) as-is for a direct lookup.
+    const stripped = skus.map(s => ({
+      original: s,
+      // Only strip single leading 'A' ï¿½ don't touch AZDP_, ALX_, etc.
+      lookup: /^A(?!ZDP_|EDM_|LX_)/i.test(s) ? s.slice(1) : s,
+    }))
+ 
+    let rows
+ 
+    if (skus.length <= SKU_LOOKUP_THRESHOLD) {
+      // -- Fast path: direct IN() --------------------------------------------
+      const lookupVals = stripped.map(x => x.lookup)
+      const placeholders = lookupVals.map(() => '?').join(',')
+      ;[rows] = await pool.query(`
+        SELECT
+          sm.ebay_sku,
+          sm.origin_sku,
+          ap.autods_id
+        FROM sku_map sm
+        LEFT JOIN autods_products ap
+          ON sm.origin_sku COLLATE utf8mb4_0900_ai_ci = ap.sku COLLATE utf8mb4_0900_ai_ci
+        WHERE sm.ebay_sku IN (${placeholders})
+      `, lookupVals)
+    } else {
+      // -- Bulk path: temp table ? JOIN -------------------------------------
+      // Using a connection from the pool so temp table is visible across queries
+      const conn = await pool.getConnection()
+      try {
+        await conn.query(`
+          CREATE TEMPORARY TABLE IF NOT EXISTS _sku_lookup_tmp (
+            ebay_sku VARCHAR(64) NOT NULL,
+            PRIMARY KEY (ebay_sku)
+          ) ENGINE=MEMORY
+        `)
+        await conn.query('DELETE FROM _sku_lookup_tmp')
+ 
+        // Insert in sub-chunks to avoid packet size limits
+        const INSERT_CHUNK = 500
+        const lookupVals   = stripped.map(x => x.lookup)
+        for (let i = 0; i < lookupVals.length; i += INSERT_CHUNK) {
+          const slice = lookupVals.slice(i, i + INSERT_CHUNK)
+          const vals  = slice.map(v => [v])
+          await conn.query(
+            'INSERT IGNORE INTO _sku_lookup_tmp (ebay_sku) VALUES ?',
+            [vals]
+          )
+        }
+ 
+        ;[rows] = await conn.query(`
+          SELECT
+            sm.ebay_sku,
+            sm.origin_sku,
+            ap.autods_id
+          FROM _sku_lookup_tmp t
+          JOIN sku_map sm
+            ON t.ebay_sku COLLATE utf8mb4_0900_ai_ci = sm.ebay_sku COLLATE utf8mb4_0900_ai_ci
+          LEFT JOIN autods_products ap
+            ON sm.origin_sku COLLATE utf8mb4_0900_ai_ci = ap.sku COLLATE utf8mb4_0900_ai_ci
+        `)
+ 
+        await conn.query('DROP TEMPORARY TABLE IF EXISTS _sku_lookup_tmp')
+      } finally {
+        conn.release()
+      }
+    }
+ 
+    // -- Rebuild original SKU ? result map ------------------------------------
+    // sku_map stores without 'A' prefix, so re-key on 'A' + ebay_sku
+    const found = new Map()
+    for (const r of rows) {
+      // Match against both original and stripped forms
+      found.set(r.ebay_sku.toUpperCase(), r)
+    }
+ 
     const result = skus.map(sku => {
-      const match = found.get(sku)
+      const lookup = /^A(?!ZDP_|EDM_|LX_)/i.test(sku) ? sku.slice(1) : sku
+      const match  = found.get(lookup.toUpperCase())
       if (!match) return { sku, origin_sku: null, autods_id: null, not_found: true }
       return {
         sku,
-        origin_sku: match.origin_sku,
-        autods_id:  match.autods_id || null,
+        origin_sku: match.origin_sku || null,
+        autods_id:  match.autods_id  || null,
       }
     })
-
+ 
     res.json(result)
-  } catch (e) { res.status(500).json({ error: e.message }) }
+  } catch (e) {
+    console.error('sku-lookup error:', e.message)
+    res.status(500).json({ error: e.message })
+  }
 })
 // --- BESTSELLER ROUTES v3 -----------------------------------------------------
 // Replaces the existing bestseller routes block in server.js
 // Changes vs v2:
-//   • Stats + dept queries now include on_ebay count (via sku_map ? ebay_current)
-//   • Export supports filter=on_ebay in addition to new/existing/uploaded/all
-//   • mark-uploaded and reset unchanged
+//   ï¿½ Stats + dept queries now include on_ebay count (via sku_map ? ebay_current)
+//   ï¿½ Export supports filter=on_ebay in addition to new/existing/uploaded/all
+//   ï¿½ mark-uploaded and reset unchanged
 
-// GET stats — cross-referenced with autods_products AND ebay_current
+// GET stats ï¿½ cross-referenced with autods_products AND ebay_current
 app.get('/api/bestsellers/stats', async (req, res) => {
   try {
     const [[totals]] = await pool.query(`
@@ -1818,10 +2107,221 @@ app.get('/api/export/missing-asins', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
 // --- SERVER ------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// BULK ADD PRODUCTS (by ASIN list) - background job + polling
+// Reuses fetch_bulk_products.py (batched GetItems + parallel GetVariations
+// with adaptive rate limiting) and the same DB-save logic as the single
+// /api/products/add route.
+// -----------------------------------------------------------------------------
+
+const { spawn } = require('child_process')
+
+const BULK_ADD_SCRIPT = '/home/emega/client/ozhair/scraper/creatorsapi-python-sdk/examples/fetch_bulk_products.py'
+
+const bulkJobs = new Map() // job_id -> job state
+
+function makeJobId() {
+  return `bulk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+async function saveFetchedProductToDb(fetched, supplier_id) {
+  const [existing] = await pool.query(
+    'SELECT product_id FROM products WHERE sku = ? LIMIT 1',
+    [fetched.sku]
+  )
+  if (existing.length) {
+    return { status: 'duplicate', product_id: existing[0].product_id }
+  }
+
+  const [result] = await pool.query(
+    `INSERT INTO products
+       (sku, title, brand, price, stock, images, description, product_url, category, metadata, supplier_id, product_type, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+    [
+      fetched.sku,
+      fetched.title,
+      fetched.brand || null,
+      fetched.price,
+      fetched.stock,
+      JSON.stringify(fetched.images),
+      fetched.description || null,
+      fetched.detail_page_url || null,
+      fetched.category || null,
+      JSON.stringify(fetched.metadata || {}),
+      supplier_id,
+      fetched.product_type || 'simple',
+    ]
+  )
+
+  if (Array.isArray(fetched.variants) && fetched.variants.length) {
+    for (const v of fetched.variants) {
+      const opts = parseVariationAttrs(v.variation_attributes)
+      const variantMetadata = {
+        condition: v.condition || '',
+        merchant_name: v.merchant_name || '',
+        dimensions: {
+          length: v.item_length || '',
+          width: v.item_width || '',
+          height: v.item_height || '',
+          unit: v.item_length_unit || '',
+        },
+        category: v.category || '',
+        description: v.description || '',
+        detail_page_url: v.detail_page_url || '',
+        brand: v.brand || '',
+      }
+      await pool.query(
+        `INSERT INTO variants
+           (product_id, variant_sku, variant_name, price, stock, images,
+            option1_name, option1_value, option2_name, option2_value, option3_name, option3_value,
+            metadata, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          result.insertId,
+          v.sku,
+          v.title || null,
+          v.price,
+          v.stock,
+          JSON.stringify(v.images || []),
+          opts[0]?.name || null, opts[0]?.value || null,
+          opts[1]?.name || null, opts[1]?.value || null,
+          opts[2]?.name || null, opts[2]?.value || null,
+          JSON.stringify(variantMetadata),
+        ]
+      )
+    }
+  }
+
+  const [[newRow]] = await pool.query('SELECT * FROM products WHERE product_id = ?', [result.insertId])
+  return { status: 'success', product: newRow }
+}
+
+function checkJobDone(jobId) {
+  const job = bulkJobs.get(jobId)
+  if (job && job.childClosed && job.pendingSaves === 0) {
+    job.status = 'done'
+  }
+}
+
+app.post('/api/products/bulk-add', async (req, res) => {
+  const { asins, supplier_id } = req.body || {}
+
+  if (!Array.isArray(asins) || asins.length === 0) {
+    return res.status(400).json({ error: 'asins (array) is required' })
+  }
+  if (!supplier_id) {
+    return res.status(400).json({ error: 'supplier_id is required' })
+  }
+  if (asins.length > 500) {
+    return res.status(400).json({ error: 'Max 500 ASINs per batch' })
+  }
+
+  const cleanAsins = asins
+    .map(a => String(a).trim().toUpperCase())
+    .filter(a => /^[A-Z0-9]{10}$/.test(a))
+
+  if (cleanAsins.length === 0) {
+    return res.status(400).json({ error: 'No valid ASINs provided (expected 10 alphanumeric chars each)' })
+  }
+
+  const jobId = makeJobId()
+  bulkJobs.set(jobId, {
+    total: cleanAsins.length,
+    done: 0,
+    success: 0,
+    failed: 0,
+    results: [],
+    status: 'running',
+    pendingSaves: 0,
+    childClosed: false,
+    startedAt: new Date().toISOString(),
+  })
+
+  res.status(202).json({ job_id: jobId, total: cleanAsins.length })
+
+  const child = spawn(PYTHON_BIN, [BULK_ADD_SCRIPT, '--asins', cleanAsins.join(','), '--workers', '10'])
+
+  let buffer = ''
+  child.stdout.on('data', (chunk) => {
+    buffer += chunk.toString()
+    let idx
+    while ((idx = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, idx).trim()
+      buffer = buffer.slice(idx + 1)
+      if (!line) continue
+
+      let parsed
+      try {
+        parsed = JSON.parse(line)
+      } catch {
+        continue
+      }
+
+      const job = bulkJobs.get(jobId)
+      if (!job) continue
+
+      if (parsed.status === 'success') {
+        job.pendingSaves += 1
+        saveFetchedProductToDb(parsed.data, supplier_id)
+          .then((saveResult) => {
+            job.done += 1
+            job.pendingSaves -= 1
+            if (saveResult.status === 'duplicate') {
+              job.failed += 1
+              job.results.push({ asin: parsed.asin, status: 'error', message: 'Already exists', product_id: saveResult.product_id })
+            } else {
+              job.success += 1
+              job.results.push({ asin: parsed.asin, status: 'success', title: saveResult.product.title, product_id: saveResult.product.product_id })
+            }
+            checkJobDone(jobId)
+          })
+          .catch((err) => {
+            job.done += 1
+            job.pendingSaves -= 1
+            job.failed += 1
+            job.results.push({ asin: parsed.asin, status: 'error', message: err.message })
+            checkJobDone(jobId)
+          })
+      } else {
+        job.done += 1
+        job.failed += 1
+        job.results.push({ asin: parsed.asin, status: 'error', message: parsed.message || 'Failed to fetch' })
+      }
+    }
+  })
+
+  child.stderr.on('data', (chunk) => {
+    console.log(`[bulk-add ${jobId}]`, chunk.toString().trim())
+  })
+
+  child.on('close', () => {
+    const job = bulkJobs.get(jobId)
+    if (job) {
+      job.childClosed = true
+      checkJobDone(jobId)
+    }
+    setTimeout(() => bulkJobs.delete(jobId), 60 * 60 * 1000)
+  })
+
+  child.on('error', (err) => {
+    const job = bulkJobs.get(jobId)
+    if (job) {
+      job.status = 'error'
+      job.error = err.message
+    }
+  })
+})
+
+app.get('/api/products/bulk-add/:jobId', (req, res) => {
+  const job = bulkJobs.get(req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Job not found (may have expired)' })
+  res.json(job)
+})
+
 const server = app.listen(process.env.PORT || 3001, () => {
   console.log(`Server running on port ${process.env.PORT || 3001}`)
 })
-// ─── ACTIVE HEALTH EXPORTS ───────────────────────────────────────────────────
+// --- ACTIVE HEALTH EXPORTS ---------------------------------------------------
 // Add these routes to server.js before the SERVER section
 
 // Active eBay listings where AutoDS product is Inactive (product_status=3)
@@ -1911,14 +2411,14 @@ app.get('/api/export/active-truly-healthy', async (req, res) => {
       `active_truly_healthy_${new Date().toISOString().slice(0,10)}.csv`)
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
-// ─── ACTIVE HEALTH — JSON list endpoint (for the table page) ───────────────
+// --- ACTIVE HEALTH ï¿½ JSON list endpoint (for the table page) ---------------
 app.get('/api/active-health/list', async (req, res) => {
   try {
     const { category, store_name, page = 0, limit = 50 } = req.query
     const offset = parseInt(page) * parseInt(limit)
     const lim    = parseInt(limit)
 
-    // ── ALL PAIRED — combines A% + AZDP_% eBay listings matched to AutoDS ──
+    // -- ALL PAIRED ï¿½ combines A% + AZDP_% eBay listings matched to AutoDS --
     if (category === 'all_paired') {
       const params1 = []
       const params2 = []
@@ -1955,7 +2455,7 @@ app.get('/api/active-health/list', async (req, res) => {
       return res.json({ data: rows, count: null })
     }
 
-    // ── NOT PAIRED — AutoDS active but never listed on eBay ──
+    // -- NOT PAIRED ï¿½ AutoDS active but never listed on eBay --
     if (category === 'not_paired') {
       const [rows] = await pool.query(`
         SELECT c.sku, a.autods_id, a.price, a.stock, a.title,
@@ -1971,7 +2471,7 @@ app.get('/api/active-health/list', async (req, res) => {
       return res.json({ data: rows, count: null })
     }
 
-    // ── TRULY HEALTHY / AUTODS INACTIVE / AUTODS OOS / ON HOLD ──
+    // -- TRULY HEALTHY / AUTODS INACTIVE / AUTODS OOS / ON HOLD --
     const categoryMap = {
       truly_healthy:   'ap.product_status = 2 AND ap.inventory_status = 1',
       autods_inactive: 'ap.product_status = 3',
@@ -2004,33 +2504,139 @@ app.get('/api/active-health/list', async (req, res) => {
     res.json({ data: rows, count: null })
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
-app.get('/api/export/active-all-paired', async (req, res) => {
+
+// List all run folders for a store, newest first
+app.get('/api/price-runs/:store', (req, res) => {
+  try {
+    const store = req.params.store
+    const storeDir = path.join(PRICE_RUNS_DIR, store)
+    if (!fs.existsSync(storeDir)) return res.json({ runs: [] })
+
+    const runs = fs.readdirSync(storeDir, { withFileTypes: true })
+      .filter(e => e.isDirectory() && e.name.startsWith(`${store}_`))
+      .map(e => e.name)
+      .sort()
+      .reverse()
+
+    res.json({ runs })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// Get full run.json for one run
+app.get('/api/price-runs/:store/:runFolder', (req, res) => {
+  try {
+    const { store, runFolder } = req.params
+    if (!runFolder.startsWith(`${store}_`)) {
+      return res.status(400).json({ error: 'Invalid run folder' })
+    }
+    const runJsonPath = path.join(PRICE_RUNS_DIR, store, runFolder, 'run.json')
+    if (!fs.existsSync(runJsonPath)) {
+      return res.status(404).json({ error: 'run.json not found for this run' })
+    }
+    const data = JSON.parse(fs.readFileSync(runJsonPath, 'utf8'))
+    res.json(data)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// List all stores that have any run history at all (for a store picker)
+app.get('/api/price-runs', (req, res) => {
+  try {
+    const entries = fs.readdirSync(PRICE_RUNS_DIR, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => e.name)
+      .filter(name => {
+        // only include dirs that actually contain at least one run folder
+        const sub = path.join(PRICE_RUNS_DIR, name)
+        try {
+          return fs.readdirSync(sub).some(f => f.startsWith(`${name}_`))
+        } catch { return false }
+      })
+      .sort()
+    res.json({ stores: entries })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+// GET /api/price-runs/summary
+// Card-view data: last run time/status per store, with freshness computed
+// server-side so the frontend doesn't need to know your cron schedule.
+app.get('/api/price-runs/summary', async (req, res) => {
   try {
     const [rows] = await pool.query(`
-      (SELECT ec.store_name, ec.sku, sm.origin_sku, ap.autods_id,
-              ec.item_id, ec.price, ec.quantity,
-              ap.price AS autods_price, ap.stock AS autods_stock,
-              ap.product_status, ap.inventory_status, ap.updated_at AS autods_updated
-       FROM ebay_current ec
-       JOIN sku_map sm
-         ON SUBSTRING(ec.sku, 2) COLLATE utf8mb4_0900_ai_ci = sm.ebay_sku COLLATE utf8mb4_0900_ai_ci
-       JOIN autods_products ap
-         ON sm.origin_sku COLLATE utf8mb4_0900_ai_ci = ap.sku COLLATE utf8mb4_0900_ai_ci
-       WHERE ec.sku LIKE 'A%' AND ec.sku NOT LIKE 'ALX_%' AND ec.sku NOT LIKE 'AZDP_%')
-      UNION ALL
-      (SELECT ec.store_name, ec.sku, SUBSTRING(ec.sku, 6) AS origin_sku, ap.autods_id,
-              ec.item_id, ec.price, ec.quantity,
-              ap.price AS autods_price, ap.stock AS autods_stock,
-              ap.product_status, ap.inventory_status, ap.updated_at AS autods_updated
-       FROM ebay_current ec
-       JOIN autods_products ap
-         ON SUBSTRING(ec.sku, 6) COLLATE utf8mb4_0900_ai_ci = ap.sku COLLATE utf8mb4_0900_ai_ci
-       WHERE ec.sku LIKE 'AZDP_%')
-      ORDER BY store_name, sku
+      SELECT store_name, last_run_at, last_run_status,
+             last_run_skus_total, last_run_skus_ok,
+             last_run_duration_s, last_run_error
+      FROM store_sync_source
+      ORDER BY store_name ASC
     `)
-    csvRes(res, rows,
-      ['store_name','sku','origin_sku','autods_id','item_id','price','quantity','autods_price','autods_stock','product_status','inventory_status','autods_updated'],
-      `active_all_paired_${new Date().toISOString().slice(0,10)}.csv`)
+
+    const now = Date.now()
+    // Runs twice a day (~every 12h). 15h threshold gives a buffer for a run
+    // that's running a bit late before flagging it stale.
+    const STALE_THRESHOLD_HOURS = 15
+
+    const stores = rows.map(r => {
+      const lastRunMs   = r.last_run_at ? new Date(r.last_run_at).getTime() : null
+      const hoursSince  = lastRunMs !== null ? (now - lastRunMs) / 3600000 : null
+      const isStale     = hoursSince === null || hoursSince > STALE_THRESHOLD_HOURS
+      const isFailed     = r.last_run_status === 'failed'
+      const isPartial    = r.last_run_status === 'partial'
+
+      let health = 'ok'
+      if (r.last_run_at === null) health = 'never_run'
+      else if (isFailed)          health = 'failed'
+      else if (isStale)           health = 'stale'
+      else if (isPartial)         health = 'partial'
+
+      return {
+        store_name:          r.store_name,
+        last_run_at:         r.last_run_at,
+        last_run_status:     r.last_run_status,
+        skus_total:          r.last_run_skus_total,
+        skus_ok:             r.last_run_skus_ok,
+        duration_s:          r.last_run_duration_s,
+        error:               r.last_run_error,
+        hours_since_run:     hoursSince,
+        health, // 'ok' | 'partial' | 'stale' | 'failed' | 'never_run'
+      }
+    })
+
+    res.json({
+      stores,
+      threshold_hours: STALE_THRESHOLD_HOURS,
+      counts: {
+        ok:       stores.filter(s => s.health === 'ok').length,
+        partial:  stores.filter(s => s.health === 'partial').length,
+        stale:    stores.filter(s => s.health === 'stale').length,
+        failed:   stores.filter(s => s.health === 'failed').length,
+        never_run: stores.filter(s => s.health === 'never_run').length,
+      },
+    })
   } catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+app.get('/api/price-runs-summary', async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT
+        store_name,
+        sync_source,
+        last_run_at,
+        last_run_status,
+        last_run_skus_total,
+        last_run_skus_ok,
+        last_run_duration_s,
+        last_run_error
+      FROM store_sync_source
+      ORDER BY last_run_at DESC
+    `)
+    res.json({ stores: rows })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
 })
 server.timeout = 300000

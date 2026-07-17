@@ -14,6 +14,9 @@ import {
 } from './useProductFilters'
 import ProductFiltersBar from './ProductFiltersBar'
 import { exportProductsCsv } from '../../lib/exportCsv'
+import AddProductModal from './AddProductModal'
+import AddProductActivityPanel from './AddProductActivityPanel'
+
 
 const PAGE_SIZE = 50
 const STALE_MS  = 30_000
@@ -258,8 +261,52 @@ export default function ProductsTab() {
 
   const [sortBy,  setSortBy]  = useState('created_at')
   const [sortDir, setSortDir] = useState('desc')
+  const [showAddProduct, setShowAddProduct] = useState(false)
 
-  useEffect(() => { setPage(0) }, [filterKey, sortBy, sortDir])
+  const [jobs, setJobs] = useState([])
+
+function startJob(jobId, total, label) {
+  setJobs(prev => [{ jobId, label, total, done: 0, success: 0, failed: 0, results: [] }, ...prev].slice(0, 50))
+  return jobId
+}
+function addJobResult(jobId, result) {
+  setJobs(prev => prev.map(j => j.jobId !== jobId ? j : {
+    ...j,
+    done: j.done + 1,
+    success: j.success + (result.status === 'success' ? 1 : 0),
+    failed: j.failed + (result.status === 'error' ? 1 : 0),
+    results: [...j.results, result],
+  }))
+}
+function removeJob(jobId) {
+  setJobs(prev => prev.filter(j => j.jobId !== jobId))
+}
+
+function pollBulkJob(jobId) {
+  const seenAsins = new Set()
+  const interval = setInterval(async () => {
+    const job = await api.get(`/api/products/bulk-add/${jobId}`)
+    if (!job || job.error) { clearInterval(interval); return }
+    for (const r of job.results) {
+      if (seenAsins.has(r.asin)) continue
+      seenAsins.add(r.asin)
+      addJobResult(jobId, { asin: r.asin, status: r.status, title: r.title, message: r.message })
+      if (r.status === 'success') {
+        api.get(`/api/products/${r.product_id}`).then(product => {
+          if (product) {
+            setProducts(prev => [product, ...prev])
+            setFilteredCount(c => c + 1)
+            setTotalCount(c => c + 1)
+            setTotalItems(c => c + 1)
+          }
+        })
+      }
+    }
+    if (job.status === 'done') { clearInterval(interval); fetchStats() }
+  }, 1500)
+}
+
+useEffect(() => { setPage(0) }, [filterKey, sortBy, sortDir])
 
   // ── Load meta once ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -421,9 +468,32 @@ export default function ProductsTab() {
 
   return (
     <div>
+     
       <CsvOverrideUploadModal open={showCsvUpload} onClose={() => setShowCsvUpload(false)} onImportStart={handleImportStart} />
       <ImportProgressToast state={importProgress} onDismiss={() => setImportProgress(null)} />
-
+   <AddProductModal
+  open={showAddProduct}
+  onClose={() => setShowAddProduct(false)}
+  onActivityStart={(asin) => {
+    const jobId = `single_${Date.now()}`
+    startJob(jobId, 1, 'Add Product')
+    return jobId
+  }}
+  onActivityDone={(jobId, patch) => {
+    addJobResult(jobId, { asin: patch.asin, status: patch.status, title: patch.title, message: patch.message })
+  }}
+  onAdded={(newProduct) => {
+    setProducts(prev => [newProduct, ...prev])
+    setFilteredCount(c => c + 1)
+    setTotalCount(c => c + 1)
+    setTotalItems(c => c + 1)
+    fetchStats()
+  }}
+  onJobStarted={(jobId, asins) => {
+    startJob(jobId, asins.length, 'Bulk Import')
+    pollBulkJob(jobId)
+  }}
+/>
       {/* Toolbar */}
       <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100 gap-3 flex-wrap">
         <ProductFiltersBar
@@ -449,9 +519,16 @@ export default function ProductsTab() {
               <Table2 size={13} />
             </button>
           </div>
-          <button className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors">
-            <Plus size={13} /> Add Product
-          </button>
+<button
+  onClick={() => setShowAddProduct(true)}
+  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
+>
+  <Plus size={13} /> Add Product
+</button>
+<AddProductActivityPanel
+  jobs={jobs}
+  onRemoveJob={removeJob}
+/>
           <button
             onClick={async () => {
               setExporting(true)

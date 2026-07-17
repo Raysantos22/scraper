@@ -899,6 +899,8 @@ export default function StoresTab() {
   const [showActiveHealth, setShowActiveHealth] = useState(false)
 
 
+
+
   useEffect(() => {
     async function load() {
       const [syncedData, countData] = await Promise.all([
@@ -1048,14 +1050,16 @@ const activeStoreCount = stores.filter(s => Number(s.total_items || 0) > 0).leng
           <SummaryCard label="Total Listings"    value={totalListings} trendLabel="total this period"           subLabel="All eBay store listings"      loading={loading} compact />
           <SummaryCard label="Active Listings"   value={totalActive}   trendLabel="active this period"          subLabel="Currently in stock & live"     loading={loading} compact />
           <SummaryCard label="Out of Stock"      value={totalOos}      trendLabel="out of stock items"          subLabel="Needs restocking attention"    loading={loading} compact />
-<SummaryCard
-  label="Stores"
-  value={storeCount}
-  trendLabel={`${activeStoreCount} active · ${storeCount - activeStoreCount} inactive`}
-  subLabel="eBay seller accounts tracked"
-  loading={loading}
-  compact
-/>          <SummaryCard label="Amazon on eBay"    value={amazonTotal}   trendLabel="Amazon SKUs on eBay"         subLabel="A-prefix and AZDP listings"    loading={loading} compact />
+  <SummaryCard
+    label="Stores"
+    value={storeCount}
+    trendLabel={`${activeStoreCount} active · ${storeCount - activeStoreCount} inactive`}
+    subLabel="eBay seller accounts tracked"
+    loading={loading}
+    compact
+  />          
+  
+  <SummaryCard label="Amazon on eBay"    value={amazonTotal}   trendLabel="Amazon SKUs on eBay"         subLabel="A-prefix and AZDP listings"    loading={loading} compact />
           {/* <SummaryCard label="AutoDS Products"   value={autodsTotal}   trendLabel="ASINs monitored"             subLabel="In AutoDS monitoring"          loading={loading} compact /> */}
 <SummaryCard
   label="AutoDS Products"
@@ -1085,7 +1089,7 @@ const activeStoreCount = stores.filter(s => Number(s.total_items || 0) > 0).leng
               compact
             />
           </div>
-        </div>
+      </div>
       </div>
 
       {/* ── Main layout ── */}
