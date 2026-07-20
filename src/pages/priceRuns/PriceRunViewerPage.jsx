@@ -1,7 +1,7 @@
 // src/pages/priceRuns/PriceRunViewerPage.jsx
 import React, { useState, useEffect, useMemo } from 'react'
 import { api } from '../../lib/api'
-import { ChevronLeft, ChevronRight, Search, X, RefreshCw, AlertCircle, CheckCircle2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Search, X, RefreshCw, AlertCircle, CheckCircle2, Package, PackageX, Ban, DollarSign, ShieldAlert } from 'lucide-react'
 
 function StatusBadge({ status }) {
   const isOk = status === 'OK'
@@ -23,6 +23,29 @@ function DecisionBadge({ decision }) {
   else if (d === 'OK-passthrough') color = 'bg-green-50 text-green-700'
   else if (d.includes('CAPPED')) color = 'bg-blue-50 text-blue-700'
   return <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium whitespace-nowrap ${color}`}>{d}</span>
+}
+
+// One tile in the summary card. `active` highlights it when it matches the
+// current decisionFilter, and clicking it applies that filter + jumps to page 0.
+function StatTile({ label, value, total, icon: Icon, colorClass, onClick, active }) {
+  const pct = total ? Math.round((value / total) * 100) : 0
+  return (
+    <button
+      onClick={onClick}
+      className={`text-left p-3 rounded-lg border transition-colors ${
+        active ? 'border-gray-900 bg-gray-900/5' : 'border-border hover:bg-muted/40'
+      } ${onClick ? 'cursor-pointer' : 'cursor-default'}`}
+    >
+      <div className={`flex items-center gap-1.5 text-[11px] font-medium ${colorClass}`}>
+        <Icon size={12} />
+        <span>{label}</span>
+      </div>
+      <div className="mt-1 flex items-baseline gap-1.5">
+        <span className="text-lg font-bold">{value.toLocaleString()}</span>
+        {total > 0 && <span className="text-[10px] text-muted-foreground">{pct}%</span>}
+      </div>
+    </button>
+  )
 }
 
 const PAGE_SIZE = 10
@@ -62,11 +85,47 @@ export default function PriceRunViewerPage({ storeName, onBack }) {
 
   const debugRows = runData?.debug_rows || []
 
+  // ── Summary stats, derived once per run load ──────────────────────────────
+  const summary = useMemo(() => {
+    const s = {
+      total: debugRows.length,
+      inStock: 0,
+      outOfStock: 0,
+      scarce: 0,
+      ok: 0,
+      zeroed: 0,
+      capped: 0,
+      noAmazonPrice: 0,
+      fetchFailed: 0,
+      other: 0,
+    }
+    for (const r of debugRows) {
+      // Final stock state (what actually ended up live)
+      if (Number(r.final_stock) > 0) s.inStock++
+      else s.outOfStock++
+
+      if (r.type === 'IN_STOCK_SCARCE') s.scarce++
+
+      const d = r.decision || ''
+      if (d === 'OK-passthrough') s.ok++
+      else if (d.includes('ZEROED')) s.zeroed++
+      else if (d.includes('CAPPED')) s.capped++
+      else if (d.startsWith('NO_AMAZON_PRICE')) s.noAmazonPrice++
+      else if (d.startsWith('FETCH_FAILED')) s.fetchFailed++
+      else s.other++
+    }
+    return s
+  }, [debugRows])
+
   const filteredRows = useMemo(() => debugRows.filter(r => {
     if (search && !r.sku?.toLowerCase().includes(search.toLowerCase()) &&
         !r.asin?.toLowerCase().includes(search.toLowerCase())) return false
     if (decisionFilter === 'failed' && !r.decision?.startsWith('FETCH_FAILED')) return false
     if (decisionFilter === 'zeroed' && !r.decision?.includes('ZEROED')) return false
+    if (decisionFilter === 'capped' && !r.decision?.includes('CAPPED')) return false
+    if (decisionFilter === 'no_price' && !r.decision?.startsWith('NO_AMAZON_PRICE')) return false
+    if (decisionFilter === 'in_stock' && !(Number(r.final_stock) > 0)) return false
+    if (decisionFilter === 'out_of_stock' && !(Number(r.final_stock) === 0)) return false
     if (decisionFilter === 'ok' && r.decision !== 'OK-passthrough') return false
     return true
   }), [debugRows, search, decisionFilter])
@@ -83,6 +142,11 @@ export default function PriceRunViewerPage({ storeName, onBack }) {
     const m = ts.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/)
     if (!m) return name
     return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`
+  }
+
+  function toggleFilter(key) {
+    setDecisionFilter(prev => (prev === key ? 'all' : key))
+    setTab('debug')
   }
 
   return (
@@ -133,6 +197,58 @@ export default function PriceRunViewerPage({ storeName, onBack }) {
             </button>
           </div>
 
+          {/* ── Summary card ── */}
+          {!loadingData && debugRows.length > 0 && (
+            <div className="border border-border rounded-xl p-4 bg-card">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold">Run Summary</h3>
+                <span className="text-[11px] text-muted-foreground">{summary.total.toLocaleString()} SKUs processed</span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-2">
+                <StatTile
+                  label="In Stock" value={summary.inStock} total={summary.total}
+                  icon={Package} colorClass="text-green-700"
+                  active={decisionFilter === 'in_stock'} onClick={() => toggleFilter('in_stock')}
+                />
+                <StatTile
+                  label="Out of Stock" value={summary.outOfStock} total={summary.total}
+                  icon={PackageX} colorClass="text-red-700"
+                  active={decisionFilter === 'out_of_stock'} onClick={() => toggleFilter('out_of_stock')}
+                />
+                <StatTile
+                  label="Scarce" value={summary.scarce} total={summary.total}
+                  icon={AlertCircle} colorClass="text-amber-700"
+                />
+                <StatTile
+                  label="OK passthrough" value={summary.ok} total={summary.total}
+                  icon={CheckCircle2} colorClass="text-green-700"
+                  active={decisionFilter === 'ok'} onClick={() => toggleFilter('ok')}
+                />
+                <StatTile
+                  label="Zeroed" value={summary.zeroed} total={summary.total}
+                  icon={Ban} colorClass="text-orange-700"
+                  active={decisionFilter === 'zeroed'} onClick={() => toggleFilter('zeroed')}
+                />
+                <StatTile
+                  label="Capped" value={summary.capped} total={summary.total}
+                  icon={ShieldAlert} colorClass="text-blue-700"
+                  active={decisionFilter === 'capped'} onClick={() => toggleFilter('capped')}
+                />
+                <StatTile
+                  label="No Amazon Price" value={summary.noAmazonPrice} total={summary.total}
+                  icon={DollarSign} colorClass="text-amber-700"
+                  active={decisionFilter === 'no_price'} onClick={() => toggleFilter('no_price')}
+                />
+              </div>
+              {summary.fetchFailed > 0 && (
+                <div className="mt-2 flex items-center gap-1.5 text-[11px] text-red-600">
+                  <AlertCircle size={12} />
+                  {summary.fetchFailed.toLocaleString()} SKUs failed to fetch — click "Fetch failed" filter below to inspect.
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="flex gap-2">
             <button
               onClick={() => setTab('debug')}
@@ -179,7 +295,11 @@ export default function PriceRunViewerPage({ storeName, onBack }) {
                 >
                   <option value="all">All decisions</option>
                   <option value="ok">OK-passthrough</option>
+                  <option value="in_stock">In stock (final)</option>
+                  <option value="out_of_stock">Out of stock (final)</option>
                   <option value="zeroed">Zeroed (low stock)</option>
+                  <option value="capped">Capped</option>
+                  <option value="no_price">No Amazon price</option>
                   <option value="failed">Fetch failed</option>
                 </select>
                 <span className="text-xs text-muted-foreground">

@@ -3,8 +3,8 @@ const { execFile } = require('child_process')
 const express = require('express')
 const cors    = require('cors')
 const mysql   = require('mysql2/promise')
-const fs      = require('fs')      // ← add this
-const path    = require('path')    // ← add this
+const fs      = require('fs')      // ? add this
+const path    = require('path')    // ? add this
 
 const app = express()
 app.use(cors({
@@ -79,8 +79,103 @@ function buildWhere(query) {
   return { where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '', params }
 }
 // --- CONTENT VIOLATION SCAN (title + description of paired eBay/AutoDS items) -
+const bulkActionJobs = new Map() // job_id -> { type, total, done, status, error, startedAt }
+ 
+function makeActionJobId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+}
+ 
+// Discovers every table with a foreign key pointing at `products`, and which
+// column it uses. Right now that's `variants.product_id` and
+// `product_overrides.sku`, but this way we never have to remember to update
+// this file again if another table adds a FK to products later.
+async function getProductReferencingTables() {
+  const [rows] = await pool.query(`
+    SELECT
+      TABLE_NAME             AS child_table,
+      COLUMN_NAME             AS child_column,
+      REFERENCED_COLUMN_NAME  AS parent_column
+    FROM information_schema.KEY_COLUMN_USAGE
+    WHERE REFERENCED_TABLE_SCHEMA = DATABASE()
+      AND REFERENCED_TABLE_NAME = 'products'
+  `)
+  return rows
+}
+// --- STORE SYNC: DETAILED SUMMARY (cached, computed in background) ----------
+let _detailedSummaryCache = null
+let _detailedSummaryComputedAt = 0
+const DETAILED_SUMMARY_TTL_MS = 10 * 60 * 1000 // 10 min
 
+async function computeDetailedSummary() {
+  const [rows] = await pool.query(`
+    SELECT store_name FROM store_sync_source ORDER BY store_name ASC
+  `)
 
+  const totals = {
+    total_skus: 0, in_stock: 0, out_of_stock: 0, scarce: 0,
+    ok: 0, zeroed: 0, capped: 0, no_amazon_price: 0, failed: 0,
+  }
+  const perStore = []
+
+  for (const r of rows) {
+    const storeDir = path.join(PRICE_RUNS_DIR, r.store_name)
+    let latestFolder = null
+    try {
+      const entries = await fs.promises.readdir(storeDir, { withFileTypes: true })
+      latestFolder = entries
+        .filter(e => e.isDirectory() && e.name.startsWith(`${r.store_name}_`))
+        .map(e => e.name)
+        .sort()
+        .reverse()[0]
+    } catch (_) { /* no run folder yet */ }
+
+    const s = {
+      store_name: r.store_name, total: 0, in_stock: 0, out_of_stock: 0,
+      scarce: 0, ok: 0, zeroed: 0, capped: 0, no_amazon_price: 0, failed: 0,
+    }
+
+    if (latestFolder) {
+      const runJsonPath = path.join(storeDir, latestFolder, 'run.json')
+      try {
+        const raw = await fs.promises.readFile(runJsonPath, 'utf8')
+        const data = JSON.parse(raw)
+        const debugRows = data.debug_rows || []
+        s.total = debugRows.length
+        for (const row of debugRows) {
+          if (Number(row.final_stock) > 0) s.in_stock++
+          else s.out_of_stock++
+          if (row.type === 'IN_STOCK_SCARCE') s.scarce++
+
+          const d = row.decision || ''
+          if (d === 'OK-passthrough') s.ok++
+          else if (d.includes('ZEROED')) s.zeroed++
+          else if (d.includes('CAPPED')) s.capped++
+          else if (d.startsWith('NO_AMAZON_PRICE')) s.no_amazon_price++
+          else if (d.startsWith('FETCH_FAILED')) s.failed++
+        }
+      } catch (_) { /* unreadable, skip */ }
+    }
+
+    for (const key of Object.keys(totals)) {
+      const srcKey = key === 'total_skus' ? 'total' : key
+      totals[key] += s[srcKey] || 0
+    }
+    perStore.push(s)
+  }
+
+  _detailedSummaryCache = {
+    ...totals,
+    stores: perStore,
+    computed_at: new Date().toISOString(),
+  }
+  _detailedSummaryComputedAt = Date.now()
+  return _detailedSummaryCache
+}
+ 
+async function countMatchingProducts(where, params) {
+  const [[{ total }]] = await pool.query(`SELECT COUNT(*) AS total FROM products ${where}`, params)
+  return total
+}
 // --- KEYSET-PAGINATED CSV (fast at any depth ï¿½ no OFFSET, no full-scan-and-discard) ---
 function csvEscape(v) {
   const s = v == null ? '' : String(v)
@@ -2504,6 +2599,186 @@ app.get('/api/active-health/list', async (req, res) => {
     res.json({ data: rows, count: null })
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
+app.get('/api/export/active-all-paired', async (req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      (SELECT ec.store_name, ec.sku, sm.origin_sku, ap.autods_id,
+              ec.item_id, ec.price, ec.quantity,
+              ap.price AS autods_price, ap.stock AS autods_stock,
+              ap.product_status, ap.inventory_status, ap.updated_at AS autods_updated
+       FROM ebay_current ec
+       JOIN sku_map sm
+         ON SUBSTRING(ec.sku, 2) COLLATE utf8mb4_0900_ai_ci = sm.ebay_sku COLLATE utf8mb4_0900_ai_ci
+       JOIN autods_products ap
+         ON sm.origin_sku COLLATE utf8mb4_0900_ai_ci = ap.sku COLLATE utf8mb4_0900_ai_ci
+       WHERE ec.sku LIKE 'A%' AND ec.sku NOT LIKE 'ALX_%' AND ec.sku NOT LIKE 'AZDP_%')
+      UNION ALL
+      (SELECT ec.store_name, ec.sku, SUBSTRING(ec.sku, 6) AS origin_sku, ap.autods_id,
+              ec.item_id, ec.price, ec.quantity,
+              ap.price AS autods_price, ap.stock AS autods_stock,
+              ap.product_status, ap.inventory_status, ap.updated_at AS autods_updated
+       FROM ebay_current ec
+       JOIN autods_products ap
+         ON SUBSTRING(ec.sku, 6) COLLATE utf8mb4_0900_ai_ci = ap.sku COLLATE utf8mb4_0900_ai_ci
+       WHERE ec.sku LIKE 'AZDP_%')
+      ORDER BY store_name, sku
+    `)
+    csvRes(res, rows,
+      ['store_name','sku','origin_sku','autods_id','item_id','price','quantity','autods_price','autods_stock','product_status','inventory_status','autods_updated'],
+      `active_all_paired_${new Date().toISOString().slice(0,10)}.csv`)
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+// --- REMCO PRODUCT ENGINE — READINESS TO REPLACE AUTODS -----------------------
+app.get('/api/remco/coverage', async (req, res) => {
+  try {
+    const [[overall]] = await pool.query(`
+      SELECT
+        COUNT(*) AS total_skus_tracked,
+        SUM(is_paired) AS live_on_ebay,
+        SUM(CASE WHEN bank_price IS NOT NULL THEN 1 ELSE 0 END) AS ready_with_price
+      FROM product_ebay_pairing
+    `)
+    const [[autodsTotal]] = await pool.query(`
+      SELECT COUNT(*) AS total FROM autods_products WHERE is_active = 1
+    `)
+    res.json({
+      total_skus_tracked: overall.total_skus_tracked,
+      live_on_ebay:        overall.live_on_ebay,
+      ready_with_price:    overall.ready_with_price,
+      readiness_pct: overall.total_skus_tracked
+        ? Math.round(100 * overall.ready_with_price / overall.total_skus_tracked)
+        : 0,
+      vs_autods_pct: autodsTotal.total
+        ? Math.round(100 * overall.total_skus_tracked / autodsTotal.total)
+        : 0,
+    })
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+// --- REMCO STORES: list + coverage stats ---------------------------------
+app.get('/api/remco/stores', async (req, res) => {
+  try {
+    const [[{ bankTotal }]] = await pool.query(
+      `SELECT COUNT(*) AS bankTotal FROM products WHERE supplier_id = 8`
+    )
+    const [rows] = await pool.query(`
+      SELECT
+        sss.store_name,
+        sss.updated_at AS added_at,
+        COUNT(rsp.id) AS paired
+      FROM store_sync_source sss
+      LEFT JOIN remco_store_pairing rsp
+        ON rsp.store_name COLLATE utf8mb4_0900_ai_ci = sss.store_name COLLATE utf8mb4_0900_ai_ci
+      WHERE sss.sync_source = 'remco'
+      GROUP BY sss.store_name, sss.updated_at
+      ORDER BY sss.store_name ASC
+    `)
+    const data = rows.map(r => ({
+      ...r,
+      bank_total: bankTotal,
+      unpaired: bankTotal - Number(r.paired),
+      coverage_pct: bankTotal ? Math.round((Number(r.paired) / bankTotal) * 1000) / 10 : 0,
+    }))
+    res.json({ bank_total: bankTotal, stores: data })
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+// --- REMCO STORES: enable a store + seed its pairing rows ----------------
+app.post('/api/remco/stores', async (req, res) => {
+  try {
+    const { store_name } = req.body || {}
+    if (!store_name?.trim()) return res.status(400).json({ error: 'store_name required' })
+    const name = store_name.trim()
+
+    await pool.query(`
+      INSERT INTO store_sync_source (store_name, sync_source)
+      VALUES (?, 'remco')
+      ON DUPLICATE KEY UPDATE sync_source = 'remco', updated_at = NOW()
+    `, [name])
+
+    await pool.query(`
+      INSERT IGNORE INTO remco_store_pairing
+        (product_id, store_name, sku, ebay_item_id, ebay_price, ebay_stock, bank_price, bank_stock)
+      SELECT p.product_id, ec.store_name, p.sku, ec.item_id, ec.price, ec.quantity, p.price, p.stock
+      FROM products p
+      JOIN sku_map sm ON p.sku COLLATE utf8mb4_0900_ai_ci = sm.origin_sku COLLATE utf8mb4_0900_ai_ci
+      JOIN ebay_current ec ON ec.sku_numeric COLLATE utf8mb4_0900_ai_ci = sm.ebay_sku COLLATE utf8mb4_0900_ai_ci
+      WHERE p.supplier_id = 8 AND ec.store_name COLLATE utf8mb4_0900_ai_ci = ? COLLATE utf8mb4_0900_ai_ci
+    `, [name])
+
+    res.json({ success: true })
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+app.get('/api/remco/stores/:store/paired', async (req, res) => {
+  try {
+    const { page = 0, limit = 50, search } = req.query
+    const offset = parseInt(page) * parseInt(limit)
+    const conditions = ['rsp.store_name = ?']
+    const params = [req.params.store]
+    if (search) { conditions.push('(rsp.sku LIKE ? OR rsp.ebay_item_id LIKE ?)'); params.push(`%${search}%`, `%${search}%`) }
+    const where = conditions.join(' AND ')
+    const [rows] = await pool.query(`
+      SELECT rsp.*, p.title
+      FROM remco_store_pairing rsp
+      LEFT JOIN products p ON p.product_id = rsp.product_id
+      WHERE ${where}
+      ORDER BY rsp.sku ASC
+      LIMIT ? OFFSET ?
+    `, [...params, parseInt(limit), offset])
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM remco_store_pairing rsp WHERE ${where}`, params)
+    res.json({ data: rows, count: total })
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+app.get('/api/remco/stores/:store/unpaired', async (req, res) => {
+  try {
+    const { page = 0, limit = 50, search } = req.query
+    const offset = parseInt(page) * parseInt(limit)
+    const store = req.params.store
+    const conditions = ['p.supplier_id = 8']
+    const params = [store]
+    if (search) { conditions.push('(p.sku LIKE ? OR p.title LIKE ?)'); params.push(`%${search}%`, `%${search}%`) }
+    const where = conditions.join(' AND ')
+
+    const [rows] = await pool.query(`
+      SELECT
+        p.product_id, p.sku, p.title, p.price, p.stock,
+        (SELECT COUNT(*) FROM remco_store_pairing rsp2 WHERE rsp2.product_id = p.product_id) AS live_elsewhere
+      FROM products p
+      WHERE ${where}
+        AND NOT EXISTS (
+          SELECT 1 FROM remco_store_pairing rsp
+          WHERE rsp.product_id = p.product_id
+            AND rsp.store_name COLLATE utf8mb4_0900_ai_ci = ? COLLATE utf8mb4_0900_ai_ci
+        )
+      ORDER BY live_elsewhere DESC, p.product_id ASC
+      LIMIT ? OFFSET ?
+    `, [...params, store, parseInt(limit), offset])
+
+    res.json({ data: rows, count: null }) // full COUNT(*) on 109k with NOT EXISTS is expensive; page without total, or cache it hourly
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+app.get('/api/remco/stores/:store/unpaired/export', async (req, res) => {
+  try {
+    const store = req.params.store
+    const [rows] = await pool.query(`
+      SELECT p.product_id, p.sku, p.title, p.price, p.stock,
+        (SELECT COUNT(*) FROM remco_store_pairing rsp2 WHERE rsp2.product_id = p.product_id) AS live_elsewhere
+      FROM products p
+      WHERE p.supplier_id = 8
+        AND NOT EXISTS (
+          SELECT 1 FROM remco_store_pairing rsp
+          WHERE rsp.product_id = p.product_id
+            AND rsp.store_name COLLATE utf8mb4_0900_ai_ci = ? COLLATE utf8mb4_0900_ai_ci
+        )
+      ORDER BY live_elsewhere DESC
+    `, [store])
+    csvRes(res, rows, ['product_id','sku','title','price','stock','live_elsewhere'],
+      `${store}_unpaired_${new Date().toISOString().slice(0,10)}.csv`)
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+// --- PRICE/STOCK RUN HISTORY (updateStorePriceStock_AmazonPA_selective3.py runs) ---
 
 // List all run folders for a store, newest first
 app.get('/api/price-runs/:store', (req, res) => {
@@ -2618,7 +2893,9 @@ app.get('/api/price-runs/summary', async (req, res) => {
     })
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
-
+// --- PRICE/STOCK RUN SUMMARY (card-view dashboard) ---------------------------
+// One row per store from store_sync_source — powers the "is this store still
+// updating" card grid. Cheap query (single small table), safe to poll often.
 app.get('/api/price-runs-summary', async (req, res) => {
   try {
     const [rows] = await pool.query(`
@@ -2638,5 +2915,359 @@ app.get('/api/price-runs-summary', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
+})
+
+app.get('/api/products/bulk-job/:jobId', (req, res) => {
+  const job = bulkActionJobs.get(req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Job not found (may have expired)' })
+  res.json({ job_id: req.params.jobId, ...job })
+})
+ 
+// DELETE many products at once (background job)
+app.post('/api/products/bulk-delete', async (req, res) => {
+  try {
+    const { product_ids, select_all, filters } = req.body || {}
+ 
+    let where, params
+    if (select_all) {
+      ;({ where, params } = buildWhere(filters || {}))
+      if (!where) {
+        // Refuse an unscoped "delete everything" — filters must narrow it down,
+        // or the caller must pass explicit product_ids instead.
+        return res.status(400).json({ error: 'Refusing to delete with no filters applied' })
+      }
+    } else {
+      if (!Array.isArray(product_ids) || product_ids.length === 0) {
+        return res.status(400).json({ error: 'product_ids required' })
+      }
+      where  = `WHERE product_id IN (${product_ids.map(() => '?').join(',')})`
+      params = product_ids
+    }
+ 
+    const total = await countMatchingProducts(where, params)
+    if (total === 0) return res.json({ success: true, job_id: null, total: 0 })
+ 
+    const jobId = makeActionJobId('del')
+    bulkActionJobs.set(jobId, { type: 'delete', total, done: 0, status: 'running', startedAt: new Date().toISOString() })
+    res.status(202).json({ job_id: jobId, total })
+ 
+    // --- background work: batch through matching rows so a 700k-row
+    // "select all" doesn't hold one giant transaction or time out ---
+    ;(async () => {
+      const job = bulkActionJobs.get(jobId)
+      const BATCH = 1000
+      try {
+        const refs = await getProductReferencingTables()
+        while (true) {
+          const [rows] = await pool.query(
+            `SELECT product_id, sku FROM products ${where} LIMIT ?`,
+            [...params, BATCH]
+          )
+          if (rows.length === 0) break
+          const ids  = rows.map(r => r.product_id)
+          const skus = rows.map(r => r.sku)
+          const idPlaceholders  = ids.map(() => '?').join(',')
+          const skuPlaceholders = skus.map(() => '?').join(',')
+
+          for (const ref of refs) {
+            const usesSku      = ref.parent_column === 'sku'
+            const placeholders = usesSku ? skuPlaceholders : idPlaceholders
+            const values       = usesSku ? skus : ids
+            await pool.query(
+              `DELETE FROM \`${ref.child_table}\` WHERE \`${ref.child_column}\` IN (${placeholders})`,
+              values
+            )
+          }
+          await pool.query(`DELETE FROM products WHERE product_id IN (${idPlaceholders})`, ids)
+
+          job.done += ids.length
+          if (rows.length < BATCH) break
+        }
+        job.status = 'done'
+      } catch (e) {
+        console.error(`bulk-delete job ${jobId} failed:`, e.message)
+        job.status = 'error'
+        job.error = e.message
+      } finally {
+        setTimeout(() => bulkActionJobs.delete(jobId), 60 * 60 * 1000)
+      }
+    })()
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+ 
+// UPDATE many products at once (background job — currently supports
+// supplier_id and/or category; add more fields to the map below as needed,
+// e.g. price/stock adjustments)
+app.post('/api/products/bulk-update', async (req, res) => {
+  try {
+    const { product_ids, select_all, filters, fields } = req.body || {}
+ 
+    const setClauses = []
+    const setParams  = []
+    if (fields?.supplier_id) { setClauses.push('supplier_id = ?'); setParams.push(fields.supplier_id) }
+    if (fields?.category)    { setClauses.push('category = ?');    setParams.push(fields.category) }
+    if (setClauses.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' })
+    }
+    setClauses.push('updated_at = NOW()')
+ 
+    let where, whereParams
+    if (select_all) {
+      ;({ where, params: whereParams } = buildWhere(filters || {}))
+      if (!where) {
+        return res.status(400).json({ error: 'Refusing to bulk-update with no filters applied' })
+      }
+    } else {
+      if (!Array.isArray(product_ids) || product_ids.length === 0) {
+        return res.status(400).json({ error: 'product_ids required' })
+      }
+      where       = `WHERE product_id IN (${product_ids.map(() => '?').join(',')})`
+      whereParams = product_ids
+    }
+ 
+    const total = await countMatchingProducts(where, whereParams)
+    if (total === 0) return res.json({ success: true, job_id: null, total: 0 })
+ 
+    const jobId = makeActionJobId('upd')
+    bulkActionJobs.set(jobId, { type: 'update', total, done: 0, status: 'running', startedAt: new Date().toISOString() })
+    res.status(202).json({ job_id: jobId, total })
+ 
+    // --- background work: keyset-paginate by product_id so a batch that no
+    // longer matches `where` after being updated (e.g. filtering by the same
+    // field you're changing) still can't be re-selected and looped forever ---
+    ;(async () => {
+      const job = bulkActionJobs.get(jobId)
+      const BATCH = 2000
+      let lastId = 0
+      try {
+        while (true) {
+          const [rows] = await pool.query(
+            `SELECT product_id FROM products ${where} AND product_id > ? ORDER BY product_id ASC LIMIT ?`,
+            [...whereParams, lastId, BATCH]
+          )
+          if (rows.length === 0) break
+          const ids = rows.map(r => r.product_id)
+          const idPlaceholders = ids.map(() => '?').join(',')
+ 
+          await pool.query(
+            `UPDATE products SET ${setClauses.join(', ')} WHERE product_id IN (${idPlaceholders})`,
+            [...setParams, ...ids]
+          )
+ 
+          job.done += ids.length
+          lastId = ids[ids.length - 1]
+          if (rows.length < BATCH) break
+        }
+        job.status = 'done'
+      } catch (e) {
+        job.status = 'error'
+        job.error = e.message
+      } finally {
+        setTimeout(() => bulkActionJobs.delete(jobId), 60 * 60 * 1000)
+      }
+    })()
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+
+app.get('/api/price-runs-summary-detailed', async (req, res) => {
+  try {
+    const isStale = Date.now() - _detailedSummaryComputedAt > DETAILED_SUMMARY_TTL_MS
+    if (!_detailedSummaryCache) {
+      // First ever call — must wait for it, nothing to serve yet
+      await computeDetailedSummary()
+    } else if (isStale) {
+      // Serve the stale cache immediately, refresh in the background for next time
+      computeDetailedSummary().catch(e => console.error('detailed summary refresh error:', e.message))
+    }
+    res.json(_detailedSummaryCache)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+app.get('/api/price-runs/:store/persistent-oos', async (req, res) => {
+  try {
+    const store = req.params.store
+    const days  = parseInt(req.query.days) || 7
+    const storeDir = path.join(PRICE_RUNS_DIR, store)
+
+    let entries
+    try {
+      entries = await fs.promises.readdir(storeDir, { withFileTypes: true })
+    } catch (_) {
+      return res.json({ skus: [], runs_checked: 0 })
+    }
+
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
+
+    const runFolders = entries
+      .filter(e => e.isDirectory() && e.name.startsWith(`${store}_`))
+      .map(e => e.name)
+      .filter(name => {
+        const parts = name.split('_')
+        const datePart = parts[parts.length - 2]
+        const timePart = parts[parts.length - 1]
+        const m = (datePart + timePart).match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/)
+        if (!m) return false
+        const runDate = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`)
+        return runDate.getTime() >= cutoff
+      })
+      .sort()
+
+    if (runFolders.length === 0) return res.json({ skus: [], runs_checked: 0 })
+
+    const skuStats = new Map()
+
+    for (const folder of runFolders) {
+      const runJsonPath = path.join(storeDir, folder, 'run.json')
+      let data
+      try {
+        const raw = await fs.promises.readFile(runJsonPath, 'utf8')  // ← async
+        data = JSON.parse(raw)
+      } catch (_) { continue }
+
+      for (const r of (data.debug_rows || [])) {
+        if (!r.sku) continue
+        const entry = skuStats.get(r.sku) || { sku: r.sku, asin: r.asin, seenCount: 0, oosCount: 0 }
+        entry.seenCount += 1
+        if (Number(r.final_stock) === 0) entry.oosCount += 1
+        skuStats.set(r.sku, entry)
+      }
+    }
+
+    const persistentOos = [...skuStats.values()]
+      .filter(e => e.seenCount >= runFolders.length * 0.8 && e.oosCount === e.seenCount)
+      .sort((a, b) => b.oosCount - a.oosCount)
+
+    res.json({
+      runs_checked: runFolders.length,
+      window_days:  days,
+      count:        persistentOos.length,
+      skus:         persistentOos,
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+// --- FLEET-WIDE PERSISTENT OOS SCAN (background job) ------------------------
+// Same logic as the per-store persistent-oos route, but runs across all
+// stores in one go. Backgrounded + polled because scanning 5 days x 24
+// stores x multiple run.json files each is too slow to do inline.
+const oosScanJobs = new Map() // job_id -> { status, days, total, done, results, ... }
+
+function makeOosJobId() {
+  return `oos_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+async function scanStorePersistentOos(storeName, days) {
+  const storeDir = path.join(PRICE_RUNS_DIR, storeName)
+  let entries
+  try {
+    entries = await fs.promises.readdir(storeDir, { withFileTypes: true })
+  } catch (_) {
+    return { store_name: storeName, runs_checked: 0, skus_tracked: 0, persistent_oos_count: 0, skus: [] }
+  }
+
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
+  const runFolders = entries
+    .filter(e => e.isDirectory() && e.name.startsWith(`${storeName}_`))
+    .map(e => e.name)
+    .filter(name => {
+      const parts = name.split('_')
+      const datePart = parts[parts.length - 2]
+      const timePart = parts[parts.length - 1]
+      const m = (datePart + timePart).match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/)
+      if (!m) return false
+      const runDate = new Date(`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`)
+      return runDate.getTime() >= cutoff
+    })
+    .sort()
+
+  if (runFolders.length === 0) {
+    return { store_name: storeName, runs_checked: 0, skus_tracked: 0, persistent_oos_count: 0, skus: [] }
+  }
+
+  const skuStats = new Map()
+  for (const folder of runFolders) {
+    const runJsonPath = path.join(storeDir, folder, 'run.json')
+    let data
+    try {
+      const raw = await fs.promises.readFile(runJsonPath, 'utf8')
+      data = JSON.parse(raw)
+    } catch (_) { continue }
+
+    for (const r of (data.debug_rows || [])) {
+      if (!r.sku) continue
+      const entry = skuStats.get(r.sku) || { sku: r.sku, asin: r.asin, seenCount: 0, oosCount: 0 }
+      entry.seenCount += 1
+      if (Number(r.final_stock) === 0) entry.oosCount += 1
+      skuStats.set(r.sku, entry)
+    }
+  }
+
+  const persistent = [...skuStats.values()]
+    .filter(e => e.seenCount >= runFolders.length * 0.8 && e.oosCount === e.seenCount)
+    .sort((a, b) => b.oosCount - a.oosCount)
+
+  return {
+    store_name: storeName,
+    runs_checked: runFolders.length,
+    skus_tracked: skuStats.size,
+    persistent_oos_count: persistent.length,
+    skus: persistent,
+  }
+}
+
+app.post('/api/price-runs-oos-scan', async (req, res) => {
+  try {
+    const days = parseInt(req.query.days) || 5
+    const [rows] = await pool.query('SELECT store_name FROM store_sync_source ORDER BY store_name ASC')
+    const storeNames = rows.map(r => r.store_name)
+
+    const jobId = makeOosJobId()
+    oosScanJobs.set(jobId, {
+      status: 'running', days, total: storeNames.length, done: 0,
+      results: [], fleet_persistent_oos_count: 0, startedAt: new Date().toISOString(),
+    })
+    res.status(202).json({ job_id: jobId, total: storeNames.length })
+
+    ;(async () => {
+      const job = oosScanJobs.get(jobId)
+      for (const storeName of storeNames) {
+        try {
+          const result = await scanStorePersistentOos(storeName, days)
+          job.results.push(result)
+          job.fleet_persistent_oos_count += result.persistent_oos_count
+        } catch (e) {
+          job.results.push({ store_name: storeName, error: e.message, persistent_oos_count: 0 })
+        }
+        job.done += 1
+      }
+      job.status = 'done'
+      setTimeout(() => oosScanJobs.delete(jobId), 30 * 60 * 1000)
+    })()
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.get('/api/price-runs-oos-scan/:jobId', (req, res) => {
+  const job = oosScanJobs.get(req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Job not found (may have expired)' })
+  const { results, ...rest } = job
+  res.json({
+    ...rest,
+    results: results.map(r => ({
+      store_name: r.store_name,
+      runs_checked: r.runs_checked,
+      skus_tracked: r.skus_tracked,
+      persistent_oos_count: r.persistent_oos_count,
+      error: r.error,
+    })),
+  })
 })
 server.timeout = 300000

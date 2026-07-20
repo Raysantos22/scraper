@@ -1,0 +1,189 @@
+recreate stock and price update
+create auto delete ban items 
+add description on the item
+new bestsellers
+new new release items
+
+
+3062111
+111375645 - ticket for autods issue
+C:\Users\ADMIN\Downloads\creatorsapi-python-sdk
+House -  (Price) * 1.3 + 17.30 = eBay Price
+Totaltools - (Price) * 1.3 + 20 = eBay Price
+Priceline -  (Price) * 1.3 + .30 = eBay Price
+Ozhair - (Price) * 1.3 + 12 = eBay Price
+Aliexpress -  (Price) * 1.3 + 12 = eBay Price
+GameCube – (Price) × 1.2 + 0.6 = eBay Price
+mecca : (Price) * 1.4 + .30 = eBay Price
+sephora : (Price) * 1.4 + .30 = eBay Price
+Kogan - For Removal (inuubos lang GC)
+BIGW - For Removal (inuubos lang GC)
+
+Priceline ✓
+Totaltools ✓
+
+OzHair
+AliExpress
+House
+
+fadil store
+
+fabfindshub - priceline, ozhair 
+auinfinitestore - priceline, ozhair
+couturecity - ozhair
+gobigsavebig - aliexpress
+mysticsnapsau- totaltools
+epicaupicks - house. kogan
+auschoicestore - kogan
+avenueonline - kogan
+megamartau - kogan
+shoppingsquare -kogan
+peakpickshopau - DO_
+ausprimepick - mecca,kogan,PrmPck_
+
+
+auschoicestore - kogan
+avenueonline - kogan
+megamartau - kogan
+shoppingsquare -kogan
+ausprimepick - kogan
+choicescorner - kogan
+
+to delete PrmPck_
+budgetbazaarau - BSF_
+diversedistrict - BN_
+merchandisemarketau - SO_
+oneclickmarketau - SO_
+retailretreat - SO_
+stationerystopau - ESF_
+warmspaces - BGW
+
+
+kogan
+
+EpicAuPicks
+AvenueOnline
+AusPrimePick
+ChoicesCorner
+ShoppingSquare
+AusChoiceStore
+AusPrimePick
+
+bigw
+
+WarmSpaces
+GoBigSaveBig
+MysticSnapsAu
+
+git add priceline/stockandprice/api/updateStorePriceStockDirectFromOZH1.py
+git add priceline/stockandprice/api/updateStorePriceStockDirectFromTOT.py
+git add priceline/stockandprice/api/updateStorePriceStockDirectFromPL1.py
+git add priceline/stockandprice/api/updateStorePriceStockDirectFrom.py
+git add .github/workflows/
+
+2:10:17 lession 3 = MIND YOUR OWN BUSINESS
+
+
+& "C:\Users\ADMIN\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.10_qbz5n2kfra8p0\LocalCache\local-packages\Python310\Scripts\uv.exe" run uvicorn server:app --host 0.0.0.0 --port 8082
+
+
+ASTRA - THEME
+WP - localWP
+WPORG - DL
+APPEARANCE THEME- ASTRA 
+
+
+orders@emega.com.au
+Multiloginorders@emega2025!
+
+
+cd ~/client/ozhair/scraper/ozhair && python3 ozhair_scraper_supabase_1.py
+
+cd ~/client/ozhair/scraper/priceline && python3 priceline_scraper_supabase_1.py
+
+
+ozhair auinfinite - 500
+priceline auinfinite - 500
+sephora epicau -  500
+mecca ausprime - 764
+
+
+C:\Windows\System32\drivers\etc\
+
+source bin/activate
+python get_urls_5.py
+
+connect to database
+
+mysql -u emegasql -p
+sCutlrhG:J=202
+
+admin@emega.com.au
+emega2026
+
+pgrep -af updateStorePriceStock_AmazonPA_selective3
+
+cd /home/emega/20200904s/node/scripts
+sudo -E NODE_ENV=production node forcedeliveredmanual.js
+
+cd ~/client/ozhair/scraper/ebay
+/home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 deletesku4_auto.py
+
+cd ~/client/ozhair/scraper/creatorsapi-python-sdk/examples/
+/home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 updateStorePriceStock_AmazonPA_selective3.py
+
+cd ~/client/ozhair/scraper/creatorsapi-python-sdk/examples/
+/home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 fetch_mecca_scraper_mysql.py
+
+cd ~/client/ozhair/scraper/creatorsapi-python-sdk/examples/
+/home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 fetch_ozhair_scraper_mysql.py
+
+
+cd /home/emega/client/ozhair/scraper/amazon && mkdir -p logs && /home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 scrape_amazon.py
+
+cd ~/client/ozhair/scraper/ebay
+/home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 ebay_snapshot_mysql.py
+
+cd ~/client/ozhair/scraper/ebay
+/home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 ebay_snapshot_selective.py
+
+
+cd /home/emega/client/ozhair/scraper/autods
+/home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 ebay_to_autods1.py
+
+
+
+mysql -u emegasql -psCutlrhG:J=202 scraper_db -e "CALL refresh_summary_cache(); DELETE FROM ebay_listings WHERE snapshot_date < CURDATE(); DELETE FROM autods_products WHERE is_active = 0; UPDATE ebay_store_stats SET last_updated = NOW();"
+
+cd ~/client/ozhair/scraper/ebay && \
+/home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 ebay_snapshot_mysql.py && \
+bash /home/emega/client/ozhair/scraper/ebay/cache_refresh.sh && \
+echo "ALL DONE - dashboard is ready"
+
+CALL refresh_summary_cache();
+
+cd ~/client/ozhair/scraper/ebay && \
+/home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 ebay_snapshot_selective.py && \
+bash /home/emega/client/ozhair/scraper/ebay/cache_refresh.sh && \
+echo "ALL DONE - dashboard is ready"
+
+cd /home/emega/client/ozhair/scraper/autods && /home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 ebay_to_autods.py && cd /home/emega/client/ozhair/scraper/ebay && /home/emega/client/ozhair/scraper/ozhair/venv/bin/python3 ebay_snapshot_mysql.py && mysql -u emegasql -psCutlrhG:J=202 scraper_db -e "CALL refresh_summary_cache(); DELETE FROM ebay_listings WHERE snapshot_date < CURDATE(); DELETE FROM autods_products WHERE is_active = 0; UPDATE ebay_store_stats SET last_updated = NOW();"
+
+-autods
+orders@emega.com.au
+Remco@2026!!!
+
+sudo mysql scraper_db
+
+pm2 restart scraper-api --update-env
+
+723054
+
+station office product 60,839
+beauty 30k
+toys 60k
+garden - 20k
+
+fabfinds - 2297
+auinfinite - 2,308
+mysticsnapsau - 500

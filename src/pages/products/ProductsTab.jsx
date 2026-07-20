@@ -4,6 +4,7 @@ import { api } from '../../lib/api'
 import {
   LayoutGrid, Table2, Plus, ChevronLeft, ChevronRight,
   ChevronDown, ChevronUp, Download, Layers, Upload, Clock,
+  Trash2, Truck, X, Loader2,
 } from 'lucide-react'
 import ProductEditPage, { parseImages, StockBadge } from './ProductEditPage'
 import { CsvOverrideUploadModal, ImportProgressToast, runBatches } from './CsvOverrideUploadModal'
@@ -125,7 +126,7 @@ const VariantRows = React.memo(function VariantRows({ productId, onSelect }) {
   }, [productId])
 
   if (!variants) return (
-    <tr><td colSpan={10} className="bg-blue-50/30 py-2">
+    <tr><td colSpan={11} className="bg-blue-50/30 py-2">
       <div className="h-3 bg-blue-100 rounded animate-pulse w-40 ml-16" />
     </td></tr>
   )
@@ -135,6 +136,7 @@ const VariantRows = React.memo(function VariantRows({ productId, onSelect }) {
     return (
       <tr key={v.variant_id} onClick={onSelect}
         className="border-b border-blue-100/40 last:border-none bg-blue-50/15 hover:bg-blue-50/50 transition-colors cursor-pointer">
+        <td className="py-2.5 pl-3 pr-2" />
         <td className="py-2.5 pl-3 pr-2">
           {vImg
             ? <img src={vImg} alt="" className="w-7 h-7 rounded-md object-cover border border-blue-100/60 ml-auto" loading="lazy" />
@@ -159,7 +161,7 @@ const VariantRows = React.memo(function VariantRows({ productId, onSelect }) {
 
 // ─── Product row ──────────────────────────────────────────────────────────────
 const ProductRow = React.memo(function ProductRow({
-  p, supplier, isOverridden, expanded, onEdit, onToggleExpand,
+  p, supplier, isOverridden, expanded, selected, onEdit, onToggleExpand, onToggleSelect,
 }) {
   const imgs = parseImages(p.images)
   const isVariant = p.product_type === 'variation_parent'
@@ -168,8 +170,16 @@ const ProductRow = React.memo(function ProductRow({
       <tr
         onClick={() => onEdit(p.product_id)}
         className={`border-b border-gray-50 transition-colors cursor-pointer last:border-none group
-          ${freshnessRowClass(p.updated_at) || 'hover:bg-gray-50/80'}`}
+          ${selected ? 'bg-red-50/50 hover:bg-red-50/70' : freshnessRowClass(p.updated_at) || 'hover:bg-gray-50/80'}`}
       >
+        <td className="pl-4 pr-1 py-2.5" onClick={e => e.stopPropagation()}>
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={() => onToggleSelect(p.product_id)}
+            className="w-3.5 h-3.5 rounded border-gray-300 text-red-600 focus:ring-red-500 cursor-pointer"
+          />
+        </td>
         <td className="px-3 py-2.5">
           {imgs[0]
             ? <img src={imgs[0]} alt="" className="w-9 h-9 rounded-lg object-cover bg-gray-100" loading="lazy" />
@@ -223,6 +233,146 @@ const ProductRow = React.memo(function ProductRow({
   )
 })
 
+// ─── Bulk action bar ──────────────────────────────────────────────────────────
+function BulkActionBar({
+  count, allOnPageSelected, filteredCount, selectAllMatching,
+  onSelectAllMatching, onClear, onDelete, onChangeSupplier, busy,
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-4 py-2.5 mb-3 rounded-xl bg-red-50 border border-red-100">
+      <div className="flex items-center gap-3 text-xs">
+        <span className="font-semibold text-red-700">
+          {selectAllMatching ? filteredCount.toLocaleString() : count.toLocaleString()} selected
+        </span>
+        {!selectAllMatching && allOnPageSelected && filteredCount > count && (
+          <button
+            onClick={onSelectAllMatching}
+            className="text-red-600 underline underline-offset-2 hover:text-red-800 font-medium"
+          >
+            Select all {filteredCount.toLocaleString()} matching products
+          </button>
+        )}
+        <button onClick={onClear} className="text-gray-400 hover:text-gray-600 flex items-center gap-1">
+          <X size={12} /> Clear
+        </button>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onChangeSupplier}
+          disabled={busy}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-gray-200 bg-white text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-40 transition-colors"
+        >
+          <Truck size={13} /> Change supplier
+        </button>
+        <button
+          onClick={onDelete}
+          disabled={busy}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-red-600 hover:bg-red-700 text-white rounded-lg disabled:opacity-40 transition-colors"
+        >
+          {busy ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />} Delete
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ─── Generic confirm dialog (replaces window.confirm) ────────────────────────
+function ConfirmDialog({
+  open, title, message, confirmLabel = 'Confirm', danger = true, busy, onConfirm, onCancel,
+}) {
+  if (!open) return null
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-5">
+        <h3 className="text-sm font-semibold text-gray-900 mb-1.5">{title}</h3>
+        <p className="text-xs text-gray-500 leading-relaxed mb-5">{message}</p>
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            disabled={busy}
+            className="px-3 py-1.5 text-xs font-semibold border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-40"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={busy}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white rounded-lg disabled:opacity-40 transition-colors ${
+              danger ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-900 hover:bg-gray-800'
+            }`}
+          >
+            {busy && <Loader2 size={13} className="animate-spin" />} {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Generic error/notice dialog (replaces window.alert) ─────────────────────
+function ErrorDialog({ open, title = 'Something went wrong', message, onClose }) {
+  if (!open) return null
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-5">
+        <h3 className="text-sm font-semibold text-gray-900 mb-1.5">{title}</h3>
+        <p className="text-xs text-gray-500 leading-relaxed mb-5 break-words">{message}</p>
+        <div className="flex justify-end">
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 text-xs font-semibold bg-gray-900 hover:bg-gray-800 text-white rounded-lg"
+          >
+            OK
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Supplier picker modal ────────────────────────────────────────────────────
+function SupplierPickerModal({ open, onClose, supplierOptions, onConfirm, busy, count }) {
+  const [supplierId, setSupplierId] = useState('')
+  useEffect(() => { if (open) setSupplierId('') }, [open])
+  if (!open) return null
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-sm p-5">
+        <h3 className="text-sm font-semibold text-gray-900 mb-1">Change supplier</h3>
+        <p className="text-xs text-gray-400 mb-4">
+          This will update the supplier for {count.toLocaleString()} product{count === 1 ? '' : 's'}.
+        </p>
+        <select
+          value={supplierId}
+          onChange={e => setSupplierId(e.target.value)}
+          className="w-full border border-gray-200 rounded-lg px-3 py-2 text-xs mb-4 focus:outline-none focus:ring-1 focus:ring-red-400"
+        >
+          <option value="">Select a supplier…</option>
+          {supplierOptions.map(s => (
+            <option key={s.id} value={s.id}>{s.name}</option>
+          ))}
+        </select>
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="px-3 py-1.5 text-xs font-semibold border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-40"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => supplierId && onConfirm(supplierId)}
+            disabled={busy || !supplierId}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-red-600 hover:bg-red-700 text-white rounded-lg disabled:opacity-40"
+          >
+            {busy && <Loader2 size={13} className="animate-spin" />} Apply
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Main Tab ─────────────────────────────────────────────────────────────────
 export default function ProductsTab() {
   const {
@@ -263,11 +413,29 @@ export default function ProductsTab() {
   const [sortDir, setSortDir] = useState('desc')
   const [showAddProduct, setShowAddProduct] = useState(false)
 
+  // ── Bulk selection state ─────────────────────────────────────────────────
+  const [selectedIds,      setSelectedIds]      = useState(new Set())
+  const [selectAllMatching, setSelectAllMatching] = useState(false)
+  const [showSupplierPicker, setShowSupplierPicker] = useState(false)
+  const [bulkBusy,          setBulkBusy]          = useState(false)
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false)
+  const [errorDialog,       setErrorDialog]       = useState(null) // { title?, message }
+
   const [jobs, setJobs] = useState([])
 
 function startJob(jobId, total, label) {
   setJobs(prev => [{ jobId, label, total, done: 0, success: 0, failed: 0, results: [] }, ...prev].slice(0, 50))
   return jobId
+}
+// Batch-style jobs (bulk delete / bulk supplier change) track raw progress
+// counts rather than a per-item results list — `kind: 'batch'` tells the
+// activity panel to render a progress bar + summary instead of a row list.
+function startBatchJob(jobId, total, label) {
+  setJobs(prev => [{ jobId, label, total, done: 0, success: 0, failed: 0, results: [], kind: 'batch', status: 'running', summary: null }, ...prev].slice(0, 50))
+  return jobId
+}
+function updateJob(jobId, patch) {
+  setJobs(prev => prev.map(j => j.jobId !== jobId ? j : { ...j, ...patch }))
 }
 function addJobResult(jobId, result) {
   setJobs(prev => prev.map(j => j.jobId !== jobId ? j : {
@@ -306,7 +474,154 @@ function pollBulkJob(jobId) {
   }, 1500)
 }
 
-useEffect(() => { setPage(0) }, [filterKey, sortBy, sortDir])
+// Polls a bulk-delete / bulk-update job (server-side batch loop) until it's
+// done or errors, updating the Activity panel's progress bar as it goes.
+function pollBulkActionJob(jobId, verbLabel, onDone) {
+  const interval = setInterval(async () => {
+    let job
+    try {
+      job = await api.get(`/api/products/bulk-job/${jobId}`)
+    } catch (e) {
+      clearInterval(interval)
+      updateJob(jobId, { status: 'error', summary: `Failed: ${e.message}` })
+      return
+    }
+    if (!job || job.error) {
+      clearInterval(interval)
+      updateJob(jobId, { status: 'error', summary: job?.error || 'Job not found' })
+      return
+    }
+    const done = job.done ?? 0
+    const total = job.total ?? 0
+    if (job.status === 'done') {
+      clearInterval(interval)
+      updateJob(jobId, {
+        done, total, status: 'done',
+        success: done, failed: 0,
+        summary: `${verbLabel} ${done.toLocaleString()} of ${total.toLocaleString()} products.`,
+      })
+      onDone && onDone()
+    } else if (job.status === 'error') {
+      clearInterval(interval)
+      updateJob(jobId, {
+        done, total, status: 'error',
+        failed: total - done,
+        summary: `Stopped after ${done.toLocaleString()} of ${total.toLocaleString()} — ${job.error || 'unknown error'}`,
+      })
+      onDone && onDone()
+    } else {
+      updateJob(jobId, { done, total })
+    }
+  }, 1000)
+}
+
+  // Clear selection whenever the filter set or page changes underneath it
+  useEffect(() => {
+    setPage(0)
+    clearSelection()
+  }, [filterKey, sortBy, sortDir])
+
+  useEffect(() => {
+    clearSelection()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page])
+
+  function clearSelection() {
+    setSelectedIds(new Set())
+    setSelectAllMatching(false)
+  }
+
+  function toggleSelect(productId) {
+    setSelectAllMatching(false)
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      next.has(productId) ? next.delete(productId) : next.add(productId)
+      return next
+    })
+  }
+
+  function toggleSelectAllOnPage() {
+    const allSelected = products.length > 0 && products.every(p => selectedIds.has(p.product_id))
+    if (allSelected) {
+      clearSelection()
+    } else {
+      setSelectAllMatching(false)
+      setSelectedIds(new Set(products.map(p => p.product_id)))
+    }
+  }
+
+  // Build the same filter query params fetchPage/fetchStats send, so bulk
+  // "select all matching" actions on the backend target exactly what's shown.
+  const buildFilterParams = useCallback(() => ({
+    ...(filterState.filterOverride  ? { override: 'true' }                         : {}),
+    ...(filterState.search          ? { search: filterState.search }               : {}),
+    ...(filterState.filterCategory  ? { category: filterState.filterCategory }     : {}),
+    ...(filterState.filterStock     ? { stock: filterState.filterStock }           : {}),
+    ...(filterState.filterSupplier  ? { supplier_id: filterState.filterSupplier }  : {}),
+    ...(filterState.filterMinQty    ? { minQty: filterState.filterMinQty }         : {}),
+    ...(filterState.filterMinPrice  ? { minPrice: filterState.filterMinPrice }     : {}),
+    ...(filterState.filterMaxPrice  ? { maxPrice: filterState.filterMaxPrice }     : {}),
+    ...(filterState.filterFreshness ? { freshness: filterState.filterFreshness }   : {}),
+    ...(filterState.filterUploaded  ? { uploaded: filterState.filterUploaded }     : {}),
+  }), [filterState])
+
+  function handleBulkDelete() {
+    const count = selectAllMatching ? filteredCount : selectedIds.size
+    if (count === 0) return
+    setConfirmDeleteOpen(true)
+  }
+
+  async function confirmBulkDelete() {
+    setBulkBusy(true)
+    try {
+      const body = selectAllMatching
+        ? { select_all: true, filters: buildFilterParams() }
+        : { product_ids: Array.from(selectedIds) }
+      const res = await api.post('/api/products/bulk-delete', body)
+      if (res?.job_id) {
+        startBatchJob(res.job_id, res.total, 'Delete products')
+        pollBulkActionJob(res.job_id, 'Deleted', () => { fetchPage(true); fetchStats(true) })
+
+        setConfirmDeleteOpen(false)
+        clearSelection()
+      } else if (res?.success) {
+        // Nothing matched — total was 0, no job needed
+        setConfirmDeleteOpen(false)
+        clearSelection()
+      } else {
+        setErrorDialog({ title: 'Delete failed', message: res?.error || 'Bulk delete failed' })
+      }
+    } catch (e) {
+      setErrorDialog({ title: 'Delete failed', message: e.message || 'Bulk delete failed' })
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  async function handleBulkSupplierChange(supplierId) {
+    setBulkBusy(true)
+    try {
+      const body = selectAllMatching
+        ? { select_all: true, filters: buildFilterParams(), fields: { supplier_id: supplierId } }
+        : { product_ids: Array.from(selectedIds), fields: { supplier_id: supplierId } }
+      const res = await api.post('/api/products/bulk-update', body)
+      if (res?.job_id) {
+        startBatchJob(res.job_id, res.total, 'Change supplier')
+        pollBulkActionJob(res.job_id, 'Updated', () => { fetchPage(true) })
+        setShowSupplierPicker(false)
+        clearSelection()
+      } else if (res?.success) {
+        setShowSupplierPicker(false)
+        clearSelection()
+      } else {
+        setErrorDialog({ title: 'Update failed', message: res?.error || 'Bulk update failed' })
+      }
+    } catch (e) {
+      setErrorDialog({ title: 'Update failed', message: e.message || 'Bulk update failed' })
+    } finally {
+      setBulkBusy(false)
+    }
+  }
 
   // ── Load meta once ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -327,81 +642,53 @@ useEffect(() => { setPage(0) }, [filterKey, sortBy, sortDir])
   }, [])
 
   // ── Page fetch ───────────────────────────────────────────────────────────
-  const fetchPage = useCallback(async () => {
-    const cacheKey = getPageCacheKey(filterKey, page, sortBy, sortDir)
-    const cached   = getPageCache(cacheKey)
-
-    if (cached) {
-      setProducts(cached.data)
-      setFilteredCount(cached.count)
-      setLoading(false)
-      if (Date.now() - cached.ts < STALE_MS) return
-    } else {
-      setLoading(true)
-    }
-
-    const params = new URLSearchParams({
-      page, limit: PAGE_SIZE, sort: sortBy, dir: sortDir,
-      ...(filterState.filterOverride  ? { override: 'true' }                         : {}),
-      ...(filterState.search          ? { search: filterState.search }               : {}),
-      ...(filterState.filterCategory  ? { category: filterState.filterCategory }     : {}),
-      ...(filterState.filterStock     ? { stock: filterState.filterStock }           : {}),
-      ...(filterState.filterSupplier  ? { supplier_id: filterState.filterSupplier }  : {}),
-      ...(filterState.filterMinQty    ? { minQty: filterState.filterMinQty }         : {}),
-      ...(filterState.filterMinPrice  ? { minPrice: filterState.filterMinPrice }     : {}),
-      ...(filterState.filterMaxPrice  ? { maxPrice: filterState.filterMaxPrice }     : {}),
-      ...(filterState.filterFreshness ? { freshness: filterState.filterFreshness }   : {}),
-      ...(filterState.filterUploaded  ? { uploaded: filterState.filterUploaded }     : {}),
-    })
-
-    const res = await api.get(`/api/products?${params}`)
-    if (res?.data) {
-      setProducts(res.data)
-      setFilteredCount(res.count || 0)
-      setPageCache(cacheKey, res.data, res.count || 0)
-    }
+const fetchPage = useCallback(async (force = false) => {
+  const cacheKey = getPageCacheKey(filterKey, page, sortBy, sortDir)
+  const cached   = !force ? getPageCache(cacheKey) : null
+  if (cached) {
+    setProducts(cached.data)
+    setFilteredCount(cached.count)
     setLoading(false)
-  }, [filterKey, page, sortBy, sortDir, filterState])
+    if (Date.now() - cached.ts < STALE_MS) return
+  } else {
+    setLoading(true)
+  }
+  const params = new URLSearchParams({ page, limit: PAGE_SIZE, sort: sortBy, dir: sortDir, ...buildFilterParams() })
+  const res = await api.get(`/api/products?${params}`)
+  if (res?.data) {
+    setProducts(res.data)
+    setFilteredCount(res.count || 0)
+    setPageCache(cacheKey, res.data, res.count || 0)
+  }
+  setLoading(false)
+}, [filterKey, page, sortBy, sortDir, buildFilterParams])
 
   // ── Stats fetch ──────────────────────────────────────────────────────────
-  const fetchStats = useCallback(async () => {
-    const cached = STATS_CACHE.get(filterKey)
-    if (cached) {
-      setTotalCount(cached.total    || 0)
-      setInStockCount(cached.inStock  || 0)
-      setOutStockCount(cached.outStock || 0)
-      setAvgPrice(cached.avgPrice   || '0.00')
-      setTotalItems(cached.totalItems || 0)
-      setStatsLoading(false)
-      if (Date.now() - cached.ts < STALE_MS) return
-    } else {
-      setStatsLoading(true)
-    }
-
-    const params = new URLSearchParams({
-      ...(filterState.filterOverride  ? { override: 'true' }                         : {}),
-      ...(filterState.search          ? { search: filterState.search }               : {}),
-      ...(filterState.filterCategory  ? { category: filterState.filterCategory }     : {}),
-      ...(filterState.filterStock     ? { stock: filterState.filterStock }           : {}),
-      ...(filterState.filterSupplier  ? { supplier_id: filterState.filterSupplier }  : {}),
-      ...(filterState.filterMinQty    ? { minQty: filterState.filterMinQty }         : {}),
-      ...(filterState.filterMinPrice  ? { minPrice: filterState.filterMinPrice }     : {}),
-      ...(filterState.filterMaxPrice  ? { maxPrice: filterState.filterMaxPrice }     : {}),
-      ...(filterState.filterFreshness ? { freshness: filterState.filterFreshness }   : {}),
-      ...(filterState.filterUploaded  ? { uploaded: filterState.filterUploaded }     : {}),
-    })
-
-    const stats = await api.get(`/api/products/stats?${params}`)
-    if (stats) {
-      setTotalCount(stats.total      || 0)
-      setInStockCount(stats.inStock   || 0)
-      setOutStockCount(stats.outStock  || 0)
-      setAvgPrice(stats.avgPrice    || '0.00')
-      setTotalItems(stats.totalItems || 0)
-      STATS_CACHE.set(filterKey, { ...stats, ts: Date.now() })
-    }
+const fetchStats = useCallback(async (force = false) => {
+  const cached = !force ? STATS_CACHE.get(filterKey) : null
+  if (cached) {
+    setTotalCount(cached.total || 0)
+    setInStockCount(cached.inStock || 0)
+    setOutStockCount(cached.outStock || 0)
+    setAvgPrice(cached.avgPrice || '0.00')
+    setTotalItems(cached.totalItems || 0)
     setStatsLoading(false)
-  }, [filterKey, filterState])
+    if (Date.now() - cached.ts < STALE_MS) return
+  } else {
+    setStatsLoading(true)
+  }
+  const params = new URLSearchParams(buildFilterParams())
+  const stats = await api.get(`/api/products/stats?${params}`)
+  if (stats) {
+    setTotalCount(stats.total || 0)
+    setInStockCount(stats.inStock || 0)
+    setOutStockCount(stats.outStock || 0)
+    setAvgPrice(stats.avgPrice || '0.00')
+    setTotalItems(stats.totalItems || 0)
+    STATS_CACHE.set(filterKey, { ...stats, ts: Date.now() })
+  }
+  setStatsLoading(false)
+}, [filterKey, buildFilterParams])
 
   useEffect(() => { fetchPage()  }, [fetchPage])
   useEffect(() => { fetchStats() }, [fetchStats])
@@ -466,11 +753,39 @@ useEffect(() => { setPage(0) }, [filterKey, sortBy, sortDir])
     )
   }
 
+  const allOnPageSelected = products.length > 0 && products.every(p => selectedIds.has(p.product_id))
+  const someOnPageSelected = products.some(p => selectedIds.has(p.product_id))
+  const selectionCount = selectAllMatching ? filteredCount : selectedIds.size
+
   return (
     <div>
      
       <CsvOverrideUploadModal open={showCsvUpload} onClose={() => setShowCsvUpload(false)} onImportStart={handleImportStart} />
       <ImportProgressToast state={importProgress} onDismiss={() => setImportProgress(null)} />
+      <SupplierPickerModal
+        open={showSupplierPicker}
+        onClose={() => setShowSupplierPicker(false)}
+        supplierOptions={supplierOptions}
+        onConfirm={handleBulkSupplierChange}
+        busy={bulkBusy}
+        count={selectionCount}
+      />
+      <ConfirmDialog
+        open={confirmDeleteOpen}
+        title="Delete products?"
+        message={`Delete ${selectionCount.toLocaleString()} product${selectionCount === 1 ? '' : 's'}? This cannot be undone.`}
+        confirmLabel="Delete"
+        danger
+        busy={bulkBusy}
+        onConfirm={confirmBulkDelete}
+        onCancel={() => setConfirmDeleteOpen(false)}
+      />
+      <ErrorDialog
+        open={!!errorDialog}
+        title={errorDialog?.title}
+        message={errorDialog?.message}
+        onClose={() => setErrorDialog(null)}
+      />
    <AddProductModal
   open={showAddProduct}
   onClose={() => setShowAddProduct(false)}
@@ -561,24 +876,49 @@ useEffect(() => { setPage(0) }, [filterKey, sortBy, sortDir])
           />
         </div>
 
+        {/* Bulk action bar (only in table view, once something is selected) */}
+        {view === 'table' && (selectedIds.size > 0 || selectAllMatching) && (
+          <BulkActionBar
+            count={selectedIds.size}
+            filteredCount={filteredCount}
+            allOnPageSelected={allOnPageSelected}
+            selectAllMatching={selectAllMatching}
+            onSelectAllMatching={() => setSelectAllMatching(true)}
+            onClear={clearSelection}
+            onDelete={handleBulkDelete}
+            onChangeSupplier={() => setShowSupplierPicker(true)}
+            busy={bulkBusy}
+          />
+        )}
+
         {/* Table */}
         {view === 'table' ? (
           <div className="border border-gray-100 rounded-xl overflow-hidden">
             <table className="w-full text-xs table-fixed">
               <colgroup>
-                <col style={{width:'48px'}}/>   {/* img */}
-                <col style={{width:'26%'}}/>    {/* product */}
+                <col style={{width:'32px'}}/>   {/* checkbox */}
+                <col style={{width:'44px'}}/>   {/* img */}
+                <col style={{width:'25%'}}/>    {/* product */}
                 <col style={{width:'12%'}}/>    {/* sku */}
                 <col style={{width:'9%'}}/>     {/* category */}
                 <col style={{width:'7%'}}/>     {/* price */}
                 <col style={{width:'5%'}}/>     {/* stock */}
                 <col style={{width:'9%'}}/>     {/* uploaded */}
                 <col style={{width:'9%'}}/>     {/* updated */}
-                <col style={{width:'11%'}}/>    {/* supplier */}
+                <col style={{width:'10%'}}/>    {/* supplier */}
                 <col style={{width:'9%'}}/>     {/* status */}
               </colgroup>
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50">
+                  <th className="pl-4 pr-1 py-3">
+                    <input
+                      type="checkbox"
+                      checked={allOnPageSelected}
+                      ref={el => { if (el) el.indeterminate = !allOnPageSelected && someOnPageSelected }}
+                      onChange={toggleSelectAllOnPage}
+                      className="w-3.5 h-3.5 rounded border-gray-300 text-red-600 focus:ring-red-500 cursor-pointer"
+                    />
+                  </th>
                   <th className="px-3 py-3" />
                   <SortTh col="title">Product</SortTh>
                   <th className="text-left px-4 py-3 text-xs text-gray-400 font-medium">SKU</th>
@@ -605,6 +945,7 @@ useEffect(() => { setPage(0) }, [filterKey, sortBy, sortDir])
                 {loading
                   ? Array.from({ length: 12 }).map((_, i) => (
                       <tr key={i} className="border-b border-gray-50">
+                        <td className="pl-4 pr-1 py-3"><div className="w-3.5 h-3.5 rounded bg-gray-100 animate-pulse" /></td>
                         <td className="px-3 py-3"><div className="w-9 h-9 rounded-lg bg-gray-100 animate-pulse" /></td>
                         <td className="px-4 py-3"><div className="h-3 bg-gray-100 rounded animate-pulse w-4/5 mb-1.5" /><div className="h-2.5 bg-gray-50 rounded animate-pulse w-2/5" /></td>
                         <td className="px-4 py-3"><div className="h-3 bg-gray-100 rounded animate-pulse w-4/5" /></td>
@@ -618,15 +959,17 @@ useEffect(() => { setPage(0) }, [filterKey, sortBy, sortDir])
                       </tr>
                     ))
                   : products.length === 0
-                  ? <tr><td colSpan={10} className="px-4 py-16 text-center text-gray-300">No products found.</td></tr>
+                  ? <tr><td colSpan={11} className="px-4 py-16 text-center text-gray-300">No products found.</td></tr>
                   : products.map(p => (
                       <ProductRow
                         key={p.product_id} p={p}
                         supplier={suppliers[p.supplier_id]}
                         isOverridden={p.is_overridden}
                         expanded={expandedRows.has(p.product_id)}
+                        selected={selectAllMatching || selectedIds.has(p.product_id)}
                         onEdit={handleEdit}
                         onToggleExpand={handleToggleExpand}
+                        onToggleSelect={toggleSelect}
                       />
                     ))
                 }
