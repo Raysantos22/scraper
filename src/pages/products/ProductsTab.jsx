@@ -21,6 +21,7 @@ import AddProductActivityPanel from './AddProductActivityPanel'
 
 const PAGE_SIZE = 50
 const STALE_MS  = 30_000
+const _activelyPolling = new Set()
 
 function OverrideBadge() {
   return (
@@ -427,9 +428,10 @@ function startJob(jobId, total, label) {
   setJobs(prev => [{ jobId, label, total, done: 0, success: 0, failed: 0, results: [] }, ...prev].slice(0, 50))
   return jobId
 }
-// Batch-style jobs (bulk delete / bulk supplier change) track raw progress
-// counts rather than a per-item results list — `kind: 'batch'` tells the
-// activity panel to render a progress bar + summary instead of a row list.
+// Batch-style jobs (bulk delete / bulk supplier change / chunked bulk-add)
+// track raw progress counts rather than a per-item results list — `kind:
+// 'batch'` tells the activity panel to render a progress bar + summary
+// instead of a row list.
 function startBatchJob(jobId, total, label) {
   setJobs(prev => [{ jobId, label, total, done: 0, success: 0, failed: 0, results: [], kind: 'batch', status: 'running', summary: null }, ...prev].slice(0, 50))
   return jobId
@@ -449,33 +451,128 @@ function addJobResult(jobId, result) {
 function removeJob(jobId) {
   setJobs(prev => prev.filter(j => j.jobId !== jobId))
 }
+async function cancelJob(jobId) {
+  try {
+    await api.post(`/api/products/bulk-add/${jobId}/cancel`)
+    updateJob(jobId, { status: 'cancelling' })
+  } catch (e) {
+    setErrorDialog({ title: 'Cancel failed', message: e.message || 'Could not cancel the job' })
+  }
+}
+// Polls a single /api/products/bulk-add job until it's done, applying the
+// same side effects as before (adding successful products to the list,
+// bumping the summary counts). Now returns a Promise that resolves once the
+// job reaches 'done', so a caller can `await` one chunk finishing before
+// starting the next — existing callers that don't await it keep working
+// exactly as before (fire-and-forget).
+// Module-level — survives remounts, one poller per jobId, ever.
+const _pollers = new Map() // jobId -> { stop: fn }
 
 function pollBulkJob(jobId) {
+  if (_pollers.has(jobId)) return _pollers.get(jobId).promise
+
   const seenAsins = new Set()
-  const interval = setInterval(async () => {
-    const job = await api.get(`/api/products/bulk-add/${jobId}`)
-    if (!job || job.error) { clearInterval(interval); return }
-    for (const r of job.results) {
-      if (seenAsins.has(r.asin)) continue
-      seenAsins.add(r.asin)
-      addJobResult(jobId, { asin: r.asin, status: r.status, title: r.title, message: r.message })
-      if (r.status === 'success') {
-        api.get(`/api/products/${r.product_id}`).then(product => {
-          if (product) {
-            setProducts(prev => [product, ...prev])
-            setFilteredCount(c => c + 1)
-            setTotalCount(c => c + 1)
-            setTotalItems(c => c + 1)
-          }
-        })
+  let stopped = false
+  let timer = null
+
+  const promise = new Promise((resolve) => {
+    async function tick() {
+      if (stopped) return
+      let job
+      try {
+        job = await api.get(`/api/products/bulk-add/${jobId}`)
+      } catch (e) {
+        // network hiccup — back off and retry, don't spin
+        timer = setTimeout(tick, 4000)
+        return
       }
+      if (!job || job.error) { finish(); return }
+
+      for (const r of job.results) {
+        if (seenAsins.has(r.asin)) continue
+        seenAsins.add(r.asin)
+        addJobResult(jobId, { asin: r.asin, status: r.status, title: r.title, message: r.message })
+        if (r.status === 'success') {
+          api.get(`/api/products/${r.product_id}`).then(product => {
+            if (product) {
+              setProducts(prev => prev.some(p => p.product_id === product.product_id) ? prev : [product, ...prev])
+              setFilteredCount(c => c + 1)
+              setTotalCount(c => c + 1)
+              setTotalItems(c => c + 1)
+            }
+          })
+        }
+      }
+      updateJob(jobId, { status: job.status })
+
+      if (job.status === 'done' || job.status === 'cancelled' || job.status === 'error') {
+        fetchStats()
+        finish()
+        return
+      }
+      timer = setTimeout(tick, 1500) // fixed 1.5s cadence, one in-flight request at a time
     }
-    if (job.status === 'done') { clearInterval(interval); fetchStats() }
-  }, 1500)
+    function finish() {
+      stopped = true
+      _pollers.delete(jobId)
+      resolve()
+    }
+    tick()
+  })
+
+  _pollers.set(jobId, { promise })
+  return promise
 }
 
-// Polls a bulk-delete / bulk-update job (server-side batch loop) until it's
-// done or errors, updating the Activity panel's progress bar as it goes.
+// Runs a large bulk-add across multiple <=500-ASIN chunks, one at a time.
+// Sequential on purpose: each chunk spawns its own fetch_bulk_products.py
+// process with its own fresh rate limiter per account, so firing many
+// chunks concurrently would multiply the effective request rate per
+// account far past what Amazon accepts and just trigger a wall of 429s.
+// One chunk at a time keeps each account's real throughput ceiling intact.
+// Runs independently of AddProductModal's lifetime, since the modal closes
+// as soon as this starts.
+async function runBulkChunksSequential(chunks, supplierId) {
+  const overallJobId = `chunked_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  const totalAsins = chunks.reduce((n, c) => n + c.length, 0)
+  startBatchJob(overallJobId, totalAsins, `Bulk Import (${chunks.length} batches)`)
+  updateJob(overallJobId, { summary: `Starting batch 1 of ${chunks.length}…` })
+
+  let doneCount = 0
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i]
+    updateJob(overallJobId, { summary: `Batch ${i + 1} of ${chunks.length} running (${chunk.length} ASINs)…` })
+
+    let res
+    try {
+      res = await api.post('/api/products/bulk-add', { asins: chunk, supplier_id: supplierId })
+    } catch (e) {
+      updateJob(overallJobId, {
+        status: 'error', done: doneCount, failed: totalAsins - doneCount,
+        summary: `Stopped at batch ${i + 1}/${chunks.length}: ${e.message || 'network error'}. ${doneCount.toLocaleString()} of ${totalAsins.toLocaleString()} completed before the failure.`,
+      })
+      return
+    }
+    if (!res?.job_id) {
+      updateJob(overallJobId, {
+        status: 'error', done: doneCount, failed: totalAsins - doneCount,
+        summary: `Stopped at batch ${i + 1}/${chunks.length}: ${res?.error || 'failed to start'}. ${doneCount.toLocaleString()} of ${totalAsins.toLocaleString()} completed before the failure.`,
+      })
+      return
+    }
+
+    await pollBulkJob(res.job_id)
+    doneCount += chunk.length
+    updateJob(overallJobId, { done: doneCount, summary: `Completed batch ${i + 1} of ${chunks.length} (${doneCount.toLocaleString()} of ${totalAsins.toLocaleString()} ASINs so far)…` })
+  }
+
+  updateJob(overallJobId, {
+    status: 'done', done: totalAsins, success: totalAsins,
+    summary: `Imported ${totalAsins.toLocaleString()} ASINs across ${chunks.length} batches.`,
+  })
+  fetchStats()
+}
+
 function pollBulkActionJob(jobId, verbLabel, onDone) {
   const interval = setInterval(async () => {
     let job
@@ -514,6 +611,39 @@ function pollBulkActionJob(jobId, verbLabel, onDone) {
     }
   }, 1000)
 }
+
+ useEffect(() => {
+    api.get('/api/activity?limit=50').then(rows => {
+      if (!rows?.length) return
+
+      setJobs(rows.map(r => ({
+        jobId: r.job_id,
+        label: r.label || r.job_type,
+        total: r.total || 0,
+        done: r.done || 0,
+        success: r.success || 0,
+        failed: r.failed || 0,
+        status: r.status,
+        summary: r.summary,
+        results: [],
+        kind: (r.job_type === 'bulk_delete' || r.job_type === 'bulk_update') ? 'batch' : undefined,
+      })))
+
+      for (const r of rows) {
+        if (r.status !== 'running') continue
+        if (r.job_type === 'bulk_add') {
+          pollBulkJob(r.job_id)
+        } else if (r.job_type === 'bulk_delete' || r.job_type === 'bulk_update') {
+          pollBulkActionJob(
+            r.job_id,
+            r.job_type === 'bulk_delete' ? 'Deleted' : 'Updated',
+            () => { fetchPage(true); fetchStats(true) }
+          )
+        }
+      }
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Clear selection whenever the filter set or page changes underneath it
   useEffect(() => {
@@ -798,7 +928,7 @@ const fetchStats = useCallback(async (force = false) => {
     addJobResult(jobId, { asin: patch.asin, status: patch.status, title: patch.title, message: patch.message })
   }}
   onAdded={(newProduct) => {
-    setProducts(prev => [newProduct, ...prev])
+    setProducts(prev => prev.some(p => p.product_id === product.product_id) ? prev : [product, ...prev])
     setFilteredCount(c => c + 1)
     setTotalCount(c => c + 1)
     setTotalItems(c => c + 1)
@@ -807,6 +937,9 @@ const fetchStats = useCallback(async (force = false) => {
   onJobStarted={(jobId, asins) => {
     startJob(jobId, asins.length, 'Bulk Import')
     pollBulkJob(jobId)
+  }}
+  onBulkChunksStart={(chunks, supplierId) => {
+    runBulkChunksSequential(chunks, supplierId)
   }}
 />
       {/* Toolbar */}
@@ -843,6 +976,7 @@ const fetchStats = useCallback(async (force = false) => {
 <AddProductActivityPanel
   jobs={jobs}
   onRemoveJob={removeJob}
+  onCancelJob={cancelJob}
 />
           <button
             onClick={async () => {

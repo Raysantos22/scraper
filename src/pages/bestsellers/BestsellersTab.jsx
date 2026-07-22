@@ -303,8 +303,7 @@ function BulkDownloadModal({ departments, onClose }) {
                       <input type="checkbox" checked={isChecked} onChange={() => toggleDept(d.department)}
                         className="accent-blue-600 flex-shrink-0 w-3.5 h-3.5"/>
                       <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: deptColor(d.department) }}/>
-                      <span className="flex-1 capitalize font-medium">{d.department.replace(/-/g,' ')}</span>
-                      {isRisky && (
+                        <span className="flex-1 capitalize font-medium">{(d.department || 'unknown').replace(/-/g,' ')}</span>                      {isRisky && (
                         <span className="text-[9px] bg-amber-100 text-amber-700 border border-amber-200 rounded px-1 py-0.5 font-medium">risky</span>
                       )}
                       {count != null && (
@@ -320,7 +319,7 @@ function BulkDownloadModal({ departments, onClose }) {
 
             {uncheckedDepts.length > 0 && (
               <p className="text-[10px] text-muted-foreground">
-                Skipping: {uncheckedDepts.map(d => d.department.replace(/-/g,' ')).join(', ')}
+                Skipping: {uncheckedDepts.map(d => (d.department || 'unknown').replace(/-/g,' ')).join(', ')}
               </p>
             )}
           </div>

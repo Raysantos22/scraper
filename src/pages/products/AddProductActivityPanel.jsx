@@ -14,15 +14,26 @@ function ProgressBar({ done, total }) {
   )
 }
 
-function JobDetailsModal({ job, onClose }) {
+function JobDetailsModal({ job, onClose, onCancel }) {
   if (!job) return null
   const hasItemResults = job.results && job.results.length > 0
+  const isRunning = job.done < job.total && job.status === 'running'
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 px-4" onClick={onClose}>
       <div className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[70vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
           <h3 className="text-sm font-semibold text-gray-900">{job.label} #{job.jobId}</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={16} /></button>
+          <div className="flex items-center gap-2">
+            {isRunning && (
+              <button
+                onClick={() => onCancel(job.jobId)}
+                className="text-xs font-semibold text-red-600 hover:text-red-700 px-2 py-1 rounded hover:bg-red-50"
+              >
+                Cancel import
+              </button>
+            )}
+            <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={16} /></button>
+          </div>
         </div>
 
         {/* Progress bar for batch-style jobs (bulk delete / bulk update) */}
@@ -70,7 +81,7 @@ function JobDetailsModal({ job, onClose }) {
   )
 }
 
-export default function AddProductActivityPanel({ jobs, onRemoveJob }) {
+export default function AddProductActivityPanel({ jobs, onRemoveJob, onCancelJob }) {
   const [open, setOpen] = useState(false)
   const [detailsJob, setDetailsJob] = useState(null)
   const panelRef = useRef(null)
@@ -91,7 +102,7 @@ export default function AddProductActivityPanel({ jobs, onRemoveJob }) {
 
   return (
     <div className="relative" ref={panelRef}>
-      <JobDetailsModal job={detailsJob} onClose={() => setDetailsJob(null)} />
+      <JobDetailsModal job={detailsJob} onClose={() => setDetailsJob(null)} onCancel={onCancelJob} />
 
       <button
         onClick={() => setOpen(o => !o)}

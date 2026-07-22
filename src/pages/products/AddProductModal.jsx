@@ -37,12 +37,22 @@ function parseCsvFile(file) {
   })
 }
 
+// Splits a flat ASIN list into groups of at most `size`, so a 25k-ASIN paste
+// becomes 51 requests of <=500 instead of one oversized request the backend
+// rejects outright.
+function chunkArray(arr, size) {
+  const out = []
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size))
+  return out
+}
+
 export default function AddProductModal({
   open, onClose,
-  onAdded,           // (product) => void            — single-add success
-  onActivityStart,   // (asin) => activityId          — single-add: register pending
-  onActivityDone,    // (activityId, patch) => void   — single-add: mark success/error
-  onJobStarted,       // (jobId, asins) => void        — bulk-add: hand off to polling
+  onAdded,             // (product) => void            — single-add success
+  onActivityStart,     // (asin) => activityId          — single-add: register pending
+  onActivityDone,      // (activityId, patch) => void   — single-add: mark success/error
+  onJobStarted,        // (jobId, asins) => void        — bulk-add, single chunk: hand off to polling
+  onBulkChunksStart,   // (chunks, supplierId) => void  — bulk-add, multiple chunks: hand off to sequential runner
 }) {
   const [mode, setMode] = useState('single') // 'single' | 'bulk'
 
@@ -160,30 +170,28 @@ export default function AddProductModal({
 
   const pastedAsins = parseAsinsFromText(bulkText)
   const allBulkAsins = Array.from(new Set([...pastedAsins, ...fileAsins]))
+  const bulkChunks = chunkArray(allBulkAsins, MAX_BULK_ASINS)
 
-  async function handleBulkSubmit() {
-    setBulkError('')
-    if (allBulkAsins.length === 0) return setBulkError('Paste some ASINs or upload a CSV first.')
-    if (!supplierId) return setBulkError('Select a supplier.')
-    if (allBulkAsins.length > MAX_BULK_ASINS) return setBulkError(`Max ${MAX_BULK_ASINS} ASINs per batch — split into multiple runs.`)
+async function handleBulkSubmit() {
+  setBulkError('')
+  if (allBulkAsins.length === 0) return setBulkError('Paste some ASINs or upload a CSV first.')
+  if (!supplierId) return setBulkError('Select a supplier.')
 
-    setBulkSubmitting(true)
-    try {
-      const data = await api.post('/api/products/bulk-add', { asins: allBulkAsins, supplier_id: supplierId })
-      if (!data || data.error) {
-        setBulkError(data?.error || 'Failed to start bulk import')
-        setBulkSubmitting(false)
-        return
-      }
-      onJobStarted?.(data.job_id, allBulkAsins)
-      onClose()
-    } catch {
-      setBulkError('Network error starting bulk import.')
-    } finally {
-      setBulkSubmitting(false)
+  setBulkSubmitting(true)
+  try {
+    const data = await api.post('/api/products/bulk-add', { asins: allBulkAsins, supplier_id: supplierId })
+    if (!data || data.error) {
+      setBulkError(data?.error || 'Failed to start bulk import')
+      return
     }
+    onJobStarted?.(data.job_id, allBulkAsins)
+    onClose()
+  } catch {
+    setBulkError('Network error starting bulk import.')
+  } finally {
+    setBulkSubmitting(false)
   }
-
+}
   const supplierPicker = (
     <div>
       <div className="flex items-center justify-between mb-1">
@@ -320,8 +328,12 @@ export default function AddProductModal({
             {supplierPicker}
 
             <div className="flex items-center justify-between text-[11px] text-gray-400">
-              <span>{allBulkAsins.length} unique ASIN(s) ready</span>
-              {allBulkAsins.length > MAX_BULK_ASINS && <span className="text-red-500">Max {MAX_BULK_ASINS} per batch</span>}
+              <span>{allBulkAsins.length.toLocaleString()} unique ASIN(s) ready</span>
+              {bulkChunks.length > 1 && (
+                <span className="text-blue-500">
+                  Will run as {bulkChunks.length} batches of up to {MAX_BULK_ASINS}
+                </span>
+              )}
             </div>
 
             {bulkError && <p className="text-xs text-red-600">{bulkError}</p>}
@@ -332,7 +344,11 @@ export default function AddProductModal({
               className="w-full flex items-center justify-center gap-2 py-2 text-xs font-semibold bg-red-600 hover:bg-red-700 text-white rounded-lg disabled:opacity-50 transition-colors"
             >
               {bulkSubmitting ? <Loader2 size={13} className="animate-spin" /> : null}
-              {bulkSubmitting ? 'Starting…' : `Start import (${allBulkAsins.length})`}
+              {bulkSubmitting
+                ? 'Starting…'
+                : bulkChunks.length > 1
+                  ? `Start import (${allBulkAsins.length.toLocaleString()} in ${bulkChunks.length} batches)`
+                  : `Start import (${allBulkAsins.length})`}
             </button>
           </div>
         )}

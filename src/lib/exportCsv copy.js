@@ -16,7 +16,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
 }))
-app.use(express.json())
+app.use(express.json({ limit: '20mb' }))
 
 const pool = mysql.createPool({
   host:               process.env.DB_HOST,
@@ -25,9 +25,9 @@ const pool = mysql.createPool({
   database:           process.env.DB_NAME,
   port:               process.env.DB_PORT || 3306,
   waitForConnections: true,
-  connectionLimit:    10,
+  connectionLimit: 10,
+  queueLimit: 50,
 })
-
 const SKU_LOOKUP_THRESHOLD = 200
 const PRICE_RUNS_DIR = '/home/emega/client/ozhair/scraper/creatorsapi-python-sdk/examples'
 
@@ -84,7 +84,8 @@ const bulkActionJobs = new Map() // job_id -> { type, total, done, status, error
 function makeActionJobId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 }
- 
+
+
 // Discovers every table with a foreign key pointing at `products`, and which
 // column it uses. Right now that's `variants.product_id` and
 // `product_overrides.sku`, but this way we never have to remember to update
@@ -228,7 +229,21 @@ async function loadBannedKeywords() {
   }))
 }
 loadBannedKeywords().catch(e => console.error('loadBannedKeywords init error:', e.message))
-
+async function reconcileOrphanedJobs() {
+  try {
+    const [result] = await pool.query(`
+      UPDATE activity_jobs
+      SET status = 'error', summary = 'Interrupted by server restart', finished_at = NOW()
+      WHERE status = 'running'
+    `)
+    if (result.affectedRows > 0) {
+      console.log(`reconcileOrphanedJobs: marked ${result.affectedRows} orphaned job(s) as error`)
+    }
+  } catch (e) {
+    console.error('reconcileOrphanedJobs failed:', e.message)
+  }
+}
+reconcileOrphanedJobs()
 const _URL_RE          = /(?:https?:\/\/|www\.)\S+/gi
 const _DOMAIN_RE       = /\b[a-zA-Z0-9][a-zA-Z0-9-]*\.(?:com|net|org|co|io|shop|store)(?:\.au|\.uk|\.nz)?\b/gi
 const _EMAIL_RE        = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi
@@ -454,8 +469,8 @@ app.post('/api/products/add', async (req, res) => {
   if (!asin || !supplier_id) {
     return res.status(400).json({ error: 'asin and supplier_id are required' })
   }
-  if (!/^[A-Z0-9]{10}$/i.test(asin.trim())) {
-    return res.status(400).json({ error: 'ASIN looks invalid (expected 10 alphanumeric chars)' })
+  if (!/^[A-Z0-9]{4,20}$/i.test(asin.trim())) {
+  return res.status(400).json({ error: 'ASIN/SKU looks invalid (expected 4-20 alphanumeric chars)' })
   }
 
   let fetched
@@ -2298,6 +2313,28 @@ function checkJobDone(jobId) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// BULK ADD PRODUCTS (by ASIN list) - background job + polling + DB activity log
+// -----------------------------------------------------------------------------
+
+async function upsertActivityJob(jobId, patch) {
+  try {
+    const fields = Object.keys(patch)
+    const cols = ['job_id', ...fields]
+    const placeholders = cols.map(() => '?').join(',')
+    const setSql = fields.map(f => `${f} = VALUES(${f})`).join(', ')
+    const values = [jobId, ...fields.map(f => patch[f])]
+    await pool.query(
+      `INSERT INTO activity_jobs (${cols.join(',')}) VALUES (${placeholders})
+       ON DUPLICATE KEY UPDATE ${setSql}`,
+      values
+    )
+  } catch (e) {
+    console.error(`upsertActivityJob(${jobId}) failed:`, e.message)
+  }
+}
+const BULK_ADD_CHUNK_SIZE = 500
+
 app.post('/api/products/bulk-add', async (req, res) => {
   const { asins, supplier_id } = req.body || {}
 
@@ -2307,16 +2344,16 @@ app.post('/api/products/bulk-add', async (req, res) => {
   if (!supplier_id) {
     return res.status(400).json({ error: 'supplier_id is required' })
   }
-  if (asins.length > 500) {
-    return res.status(400).json({ error: 'Max 500 ASINs per batch' })
+  if (asins.length > 50000) {
+    return res.status(400).json({ error: 'Max 50,000 ASINs per import' })
   }
 
   const cleanAsins = asins
     .map(a => String(a).trim().toUpperCase())
-    .filter(a => /^[A-Z0-9]{10}$/.test(a))
+    .filter(a => /^[A-Z0-9]{4,20}$/.test(a))
 
   if (cleanAsins.length === 0) {
-    return res.status(400).json({ error: 'No valid ASINs provided (expected 10 alphanumeric chars each)' })
+    return res.status(400).json({ error: 'No valid ASINs provided (expected 4-20 alphanumeric chars each)' })
   }
 
   const jobId = makeJobId()
@@ -2330,82 +2367,132 @@ app.post('/api/products/bulk-add', async (req, res) => {
     pendingSaves: 0,
     childClosed: false,
     startedAt: new Date().toISOString(),
+    _lastDbSync: 0,
+  })
+
+  upsertActivityJob(jobId, {
+    job_type: 'bulk_add',
+    label: 'Bulk Import',
+    total: cleanAsins.length,
+    done: 0,
+    success: 0,
+    failed: 0,
+    status: 'running',
   })
 
   res.status(202).json({ job_id: jobId, total: cleanAsins.length })
 
-  const child = spawn(PYTHON_BIN, [BULK_ADD_SCRIPT, '--asins', cleanAsins.join(','), '--workers', '10'])
-
-  let buffer = ''
-  child.stdout.on('data', (chunk) => {
-    buffer += chunk.toString()
-    let idx
-    while ((idx = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, idx).trim()
-      buffer = buffer.slice(idx + 1)
-      if (!line) continue
-
-      let parsed
-      try {
-        parsed = JSON.parse(line)
-      } catch {
-        continue
-      }
-
-      const job = bulkJobs.get(jobId)
-      if (!job) continue
-
-      if (parsed.status === 'success') {
-        job.pendingSaves += 1
-        saveFetchedProductToDb(parsed.data, supplier_id)
-          .then((saveResult) => {
-            job.done += 1
-            job.pendingSaves -= 1
-            if (saveResult.status === 'duplicate') {
-              job.failed += 1
-              job.results.push({ asin: parsed.asin, status: 'error', message: 'Already exists', product_id: saveResult.product_id })
-            } else {
-              job.success += 1
-              job.results.push({ asin: parsed.asin, status: 'success', title: saveResult.product.title, product_id: saveResult.product.product_id })
-            }
-            checkJobDone(jobId)
-          })
-          .catch((err) => {
-            job.done += 1
-            job.pendingSaves -= 1
-            job.failed += 1
-            job.results.push({ asin: parsed.asin, status: 'error', message: err.message })
-            checkJobDone(jobId)
-          })
-      } else {
-        job.done += 1
-        job.failed += 1
-        job.results.push({ asin: parsed.asin, status: 'error', message: parsed.message || 'Failed to fetch' })
-      }
-    }
-  })
-
-  child.stderr.on('data', (chunk) => {
-    console.log(`[bulk-add ${jobId}]`, chunk.toString().trim())
-  })
-
-  child.on('close', () => {
-    const job = bulkJobs.get(jobId)
-    if (job) {
-      job.childClosed = true
-      checkJobDone(jobId)
-    }
-    setTimeout(() => bulkJobs.delete(jobId), 60 * 60 * 1000)
-  })
-
-  child.on('error', (err) => {
-    const job = bulkJobs.get(jobId)
-    if (job) {
-      job.status = 'error'
-      job.error = err.message
-    }
-  })
+  // Runs entirely server-side — a browser refresh or closed tab no longer
+  // stops the import partway through.
+  runBulkAddChunksSequential(jobId, cleanAsins, supplier_id)
 })
+
+async function runBulkAddChunksSequential(jobId, cleanAsins, supplier_id) {
+  const job = bulkJobs.get(jobId)
+  if (!job) return
+
+  const chunks = []
+  for (let i = 0; i < cleanAsins.length; i += BULK_ADD_CHUNK_SIZE) {
+    chunks.push(cleanAsins.slice(i, i + BULK_ADD_CHUNK_SIZE))
+  }
+
+  for (const chunk of chunks) {
+    if (job.cancelled) break   // ← check before starting the next chunk
+
+    await new Promise((resolveChunk) => {
+      const child = spawn(PYTHON_BIN, [BULK_ADD_SCRIPT, '--asins', chunk.join(','), '--workers', '10'])
+      job.currentChild = child   // ← track it so cancel can kill it mid-chunk
+      let buffer = ''
+
+      const syncToDb = () => {
+        const now = Date.now()
+        if (now - job._lastDbSync > 2000) {
+          job._lastDbSync = now
+          upsertActivityJob(jobId, { done: job.done, success: job.success, failed: job.failed })
+        }
+      }
+
+      child.stdout.on('data', (dataChunk) => {
+        buffer += dataChunk.toString()
+        let idx
+        while ((idx = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, idx).trim()
+          buffer = buffer.slice(idx + 1)
+          if (!line) continue
+
+          let parsed
+          try { parsed = JSON.parse(line) } catch { continue }
+
+          if (parsed.status === 'success') {
+            job.pendingSaves += 1
+            saveFetchedProductToDb(parsed.data, supplier_id)
+              .then((saveResult) => {
+                job.done += 1
+                job.pendingSaves -= 1
+                if (saveResult.status === 'duplicate') {
+                  job.failed += 1
+                  job.results.push({ asin: parsed.asin, status: 'error', message: 'Already exists', product_id: saveResult.product_id })
+                } else {
+                  job.success += 1
+                  job.results.push({ asin: parsed.asin, status: 'success', title: saveResult.product.title, product_id: saveResult.product.product_id })
+                }
+                syncToDb()
+              })
+              .catch((err) => {
+                job.done += 1
+                job.pendingSaves -= 1
+                job.failed += 1
+                job.results.push({ asin: parsed.asin, status: 'error', message: err.message })
+                syncToDb()
+              })
+          } else {
+            job.done += 1
+            job.failed += 1
+            job.results.push({ asin: parsed.asin, status: 'error', message: parsed.message || 'Failed to fetch' })
+            syncToDb()
+          }
+        }
+      })
+
+      child.stderr.on('data', (d) => console.log(`[bulk-add ${jobId}]`, d.toString().trim()))
+
+      child.on('close', async () => {
+        while (job.pendingSaves > 0) await new Promise(r => setTimeout(r, 100))
+        job.currentChild = null
+        resolveChunk()
+      })
+
+      child.on('error', (err) => {
+        job.status = 'error'
+        job.error = err.message
+        job.currentChild = null
+        resolveChunk()
+      })
+    })
+
+    if (job.status === 'error' || job.cancelled) break
+  }
+
+  job.childClosed = true
+  const finalStatus = job.cancelled ? 'cancelled' : (job.status === 'error' ? 'error' : 'done')
+  job.status = finalStatus
+
+  upsertActivityJob(jobId, {
+    done: job.done,
+    success: job.success,
+    failed: job.failed,
+    status: finalStatus,
+    finished_at: new Date(),
+    summary: finalStatus === 'cancelled'
+      ? `Cancelled after ${job.done.toLocaleString()} of ${job.total.toLocaleString()} ASINs`
+      : `Imported ${job.success.toLocaleString()} of ${job.total.toLocaleString()} ASINs` +
+        (job.failed ? ` (${job.failed.toLocaleString()} failed)` : ''),
+  })
+
+  setTimeout(() => bulkJobs.delete(jobId), 60 * 60 * 1000)
+}
+
+ 
 
 app.get('/api/products/bulk-add/:jobId', (req, res) => {
   const job = bulkJobs.get(req.params.jobId)
@@ -2413,6 +2500,21 @@ app.get('/api/products/bulk-add/:jobId', (req, res) => {
   res.json(job)
 })
 
+// --- ACTIVITY LOG (persisted job history — survives restarts + refreshes) ---
+app.get('/api/activity', async (req, res) => {
+  try {
+    const { status, limit = 50 } = req.query
+    const conditions = []
+    const params = []
+    if (status) { conditions.push('status = ?'); params.push(status) }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+    const [rows] = await pool.query(
+      `SELECT * FROM activity_jobs ${where} ORDER BY started_at DESC LIMIT ?`,
+      [...params, parseInt(limit)]
+    )
+    res.json(rows)
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
 const server = app.listen(process.env.PORT || 3001, () => {
   console.log(`Server running on port ${process.env.PORT || 3001}`)
 })
@@ -3126,7 +3228,7 @@ app.get('/api/price-runs/:store/persistent-oos', async (req, res) => {
       const runJsonPath = path.join(storeDir, folder, 'run.json')
       let data
       try {
-        const raw = await fs.promises.readFile(runJsonPath, 'utf8')  // ← async
+        const raw = await fs.promises.readFile(runJsonPath, 'utf8')  // ? async
         data = JSON.parse(raw)
       } catch (_) { continue }
 
@@ -3269,5 +3371,33 @@ app.get('/api/price-runs-oos-scan/:jobId', (req, res) => {
       error: r.error,
     })),
   })
+})
+app.get('/api/price-runs-oos-scan/:jobId/export', (req, res) => {
+  const job = oosScanJobs.get(req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Job not found (may have expired)' })
+  if (job.status !== 'done') return res.status(409).json({ error: 'Scan is still running — wait for it to finish' })
+ 
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+  res.setHeader('Content-Disposition', `attachment; filename="persistent_oos_delete_${new Date().toISOString().slice(0, 10)}.csv"`)
+ 
+  res.write('SKU,Action,Channel ID\n')
+  for (const storeResult of job.results) {
+    for (const s of (storeResult.skus || [])) {
+      res.write(`${csvEscape(s.sku)},DeleteInventory,EBAY_AU\n`)
+    }
+  }
+  res.end()
+})
+app.post('/api/products/bulk-add/:jobId/cancel', (req, res) => {
+  const job = bulkJobs.get(req.params.jobId)
+  if (!job) return res.status(404).json({ error: 'Job not found (may have expired)' })
+  if (job.status !== 'running') return res.status(409).json({ error: 'Job is not running' })
+
+  job.cancelled = true
+  if (job.currentChild) {
+    job.currentChild.kill('SIGTERM')   // stops the in-flight chunk immediately
+  }
+
+  res.json({ success: true })
 })
 server.timeout = 300000
