@@ -387,6 +387,7 @@ export default function ProductsTab() {
   const [editingId,      setEditingId]      = useState(null)
   const [view,           setView]           = useState('table')
   const [exporting,      setExporting]      = useState(false)
+  const [exportProgress, setExportProgress] = useState(null)   // { stage, done, total }
   const [expandedRows,   setExpandedRows]   = useState(new Set())
   const [showCsvUpload,  setShowCsvUpload]  = useState(false)
   const [importProgress, setImportProgress] = useState(null)
@@ -852,7 +853,17 @@ const fetchStats = useCallback(async (force = false) => {
       </th>
     )
   }
-
+function exportLabel(p) {
+  if (!p) return 'Exporting…'
+  switch (p.stage) {
+    case 'products':    return p.total ? `Fetching products… ${p.done.toLocaleString()}/${p.total.toLocaleString()}` : 'Fetching products…'
+    case 'overrides':   return 'Fetching overrides…'
+    case 'variants':    return p.total ? `Fetching variants… ${p.done.toLocaleString()}/${p.total.toLocaleString()}` : 'Fetching variants…'
+    case 'building':    return 'Building CSV…'
+    case 'downloading': return 'Downloading…'
+    default:             return 'Exporting…'
+  }
+}
   function refreshOverrides() {
     api.get('/api/products/override-skus')
       .then(data => { if (data) setOverrideSkus(new Set(data)) })
@@ -927,13 +938,13 @@ const fetchStats = useCallback(async (force = false) => {
   onActivityDone={(jobId, patch) => {
     addJobResult(jobId, { asin: patch.asin, status: patch.status, title: patch.title, message: patch.message })
   }}
-  onAdded={(newProduct) => {
-    setProducts(prev => prev.some(p => p.product_id === product.product_id) ? prev : [product, ...prev])
+onAdded={(newProduct) => {
+    setProducts(prev => prev.some(p => p.product_id === newProduct.product_id) ? prev : [newProduct, ...prev])
     setFilteredCount(c => c + 1)
     setTotalCount(c => c + 1)
     setTotalItems(c => c + 1)
     fetchStats()
-  }}
+}}
   onJobStarted={(jobId, asins) => {
     startJob(jobId, asins.length, 'Bulk Import')
     pollBulkJob(jobId)
@@ -979,16 +990,19 @@ const fetchStats = useCallback(async (force = false) => {
   onCancelJob={cancelJob}
 />
           <button
-            onClick={async () => {
-              setExporting(true)
-              await exportProductsCsv(filterState)
-              setExporting(false)
-            }}
-            disabled={exporting}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-40 transition-colors"
-          >
-            <Download size={13} />{exporting ? 'Exporting…' : hasFilters ? 'Export filtered CSV' : 'Export CSV'}
-          </button>
+  onClick={async () => {
+    setExporting(true)
+    setExportProgress(null)
+    await exportProductsCsv(filterState, setExportProgress)
+    setExporting(false)
+    setExportProgress(null)
+  }}
+  disabled={exporting}
+  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-40 transition-colors"
+>
+  {exporting ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+  {exporting ? exportLabel(exportProgress) : (hasFilters ? 'Export filtered CSV' : 'Export CSV')}
+</button>
           <button onClick={() => setShowCsvUpload(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold border border-gray-200 text-gray-600 rounded-lg hover:bg-gray-50 transition-colors">
             <Upload size={13} /> Import Overrides CSV

@@ -28,6 +28,20 @@ const pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 50,
 })
+class Semaphore {
+  constructor(max) { this.max = max; this.count = 0; this.queue = [] }
+  async acquire() {
+    if (this.count < this.max) { this.count++; return }
+    await new Promise(resolve => this.queue.push(resolve))
+    this.count++
+  }
+  release() {
+    this.count--
+    const next = this.queue.shift()
+    if (next) next()
+  }
+}
+const dbSaveSemaphore = new Semaphore(5)  // caps concurrent DB saves during bulk import
 const SKU_LOOKUP_THRESHOLD = 200
 const PRICE_RUNS_DIR = '/home/emega/client/ozhair/scraper/creatorsapi-python-sdk/examples'
 
@@ -464,8 +478,8 @@ function parseVariationAttrs(attrString) {
 // Which Amazon account is used to fetch is picked automatically inside
 // fetch_single_product.py ï¿½ no dropdown needed for that on the frontend.
 app.post('/api/products/add', async (req, res) => {
-  const { asin, supplier_id } = req.body || {}
-
+  const { asin, supplier_id, added_by } = req.body || {}
+const addedBy = added_by || 'shared_admin'
   if (!asin || !supplier_id) {
     return res.status(400).json({ error: 'asin and supplier_id are required' })
   }
@@ -554,6 +568,17 @@ app.post('/api/products/add', async (req, res) => {
     }
 
     const [[newRow]] = await pool.query('SELECT * FROM products WHERE product_id = ?', [result.insertId])
+
+    const editJobId = `add_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    upsertActivityJob(editJobId, {
+      job_type: 'product_add',
+      label: 'Product Add',
+      total: 1, done: 1, success: 1, failed: 0,
+      status: 'done',
+      summary: `SKU ${fetched.sku} added by ${addedBy}`,
+      finished_at: new Date(),
+    })
+
     return res.status(201).json(newRow)
   } catch (err) {
     console.error('Add product DB insert failed:', err.message)
@@ -583,6 +608,32 @@ function runAddProductScript(asin) {
     )
   })
 }
+// --- VARIANTS: BULK FETCH -----------------------------------------------
+// Same pattern as /api/product-overrides/bulk-get — one query for many
+// product_ids instead of one request per product. Chunked at the DB level
+// so a 40k-ID export doesn't build one giant IN() clause.
+app.post('/api/variants/bulk', async (req, res) => {
+  try {
+    const { product_ids } = req.body || {}
+    if (!Array.isArray(product_ids) || product_ids.length === 0) return res.json({})
+
+    const grouped = {}
+    const CHUNK = 2000
+    for (let i = 0; i < product_ids.length; i += CHUNK) {
+      const slice = product_ids.slice(i, i + CHUNK)
+      const placeholders = slice.map(() => '?').join(',')
+      const [rows] = await pool.query(
+        `SELECT * FROM variants WHERE product_id IN (${placeholders})`,
+        slice
+      )
+      for (const v of rows) {
+        if (!grouped[v.product_id]) grouped[v.product_id] = []
+        grouped[v.product_id].push(v)
+      }
+    }
+    res.json(grouped)
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
 // --- SYNC LAST-SYNCED --------------------------------------------------------
 app.get('/api/sync/last-synced', async (req, res) => {
   try {
@@ -1439,8 +1490,8 @@ app.get('/api/products', async (req, res) => {
     const orderCol = safeCols.includes(sort) ? sort : 'created_at'
     const orderDir = dir === 'asc' ? 'ASC' : 'DESC'
     const cols = override === 'true'
-  ? 'product_id,sku,title,price,stock,category,brand,images,supplier_id,product_type,created_at,updated_at,is_overridden,description'
-  : 'product_id,sku,title,price,stock,category,brand,images,supplier_id,product_type,created_at,updated_at,description'
+  ? 'product_id,sku,title,price,stock,category,brand,images,supplier_id,product_type,created_at,updated_at,is_overridden,description,metadata'
+  : 'product_id,sku,title,price,stock,category,brand,images,supplier_id,product_type,created_at,updated_at,description,metadata'
     const { where, params } = buildWhere(req.query)
     const [rows] = await pool.query(
       `SELECT ${cols} FROM ${table} ${where} ORDER BY ${orderCol} ${orderDir} LIMIT ? OFFSET ?`,
@@ -1501,11 +1552,33 @@ app.post('/api/product-overrides/bulk', async (req, res) => {
 app.post('/api/product-overrides', async (req, res) => {
   try {
     const { sku, title, description, images } = req.body
+
+    const [[before]] = await pool.query('SELECT title, description FROM product_overrides WHERE sku = ?', [sku])
+
+    // TODO: swap 'shared_admin' for the real logged-in user once multi-user login exists
+    const editedBy = req.body.edited_by || 'shared_admin'
+
     await pool.query(`
       INSERT INTO product_overrides (sku, title, description, images, updated_at, updated_by)
-      VALUES (?, ?, ?, ?, NOW(), 'user')
-      ON DUPLICATE KEY UPDATE title=VALUES(title), description=VALUES(description), images=VALUES(images), updated_at=NOW()`,
-      [sku, title, description, JSON.stringify(images || [])])
+      VALUES (?, ?, ?, ?, NOW(), ?)
+      ON DUPLICATE KEY UPDATE title=VALUES(title), description=VALUES(description), images=VALUES(images), updated_at=NOW(), updated_by=VALUES(updated_by)`,
+      [sku, title, description, JSON.stringify(images || []), editedBy])
+
+    const editJobId = `edit_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    upsertActivityJob(editJobId, {
+      job_type: 'product_edit',
+      label: 'Product Edit',
+      total: 1,
+      done: 1,
+      success: 1,
+      failed: 0,
+      status: 'done',
+      summary: `SKU ${sku} edited by ${editedBy}` +
+        (before && before.title !== title ? ` — title changed` : '') +
+        (before && before.description !== description ? ` — description changed` : ''),
+      finished_at: new Date(),
+    })
+
     res.json({ success: true })
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
@@ -2333,10 +2406,42 @@ async function upsertActivityJob(jobId, patch) {
     console.error(`upsertActivityJob(${jobId}) failed:`, e.message)
   }
 }
+
+
+
+
+// Buffers per-ASIN results in memory and flushes them to activity_job_items
+// in batches, so a 25k-ASIN import doesn't mean 25k individual INSERTs.
+const itemLogBuffer = new Map() // job_id -> array of pending rows
+
+function bufferJobItem(jobId, row) {
+  if (!itemLogBuffer.has(jobId)) itemLogBuffer.set(jobId, [])
+  const buf = itemLogBuffer.get(jobId)
+  buf.push(row)
+  if (buf.length >= 100) flushJobItems(jobId)
+}
+
+async function flushJobItems(jobId) {
+  const rows = itemLogBuffer.get(jobId)
+  if (!rows || rows.length === 0) return
+  itemLogBuffer.set(jobId, [])
+  const values = rows.map(r => [jobId, r.identifier, r.status, r.title || null, r.product_id || null, r.message || null])
+  try {
+    await pool.query(
+      `INSERT INTO activity_job_items (job_id, identifier, status, title, product_id, message) VALUES ?`,
+      [values]
+    )
+  } catch (e) {
+    console.error(`flushJobItems(${jobId}) failed:`, e.message)
+  }
+}
+
 const BULK_ADD_CHUNK_SIZE = 500
 
 app.post('/api/products/bulk-add', async (req, res) => {
-  const { asins, supplier_id } = req.body || {}
+  const { asins, supplier_id, added_by } = req.body || {}
+  // TODO: swap 'shared_admin' for the real logged-in user once multi-user login exists
+  const addedBy = added_by || 'shared_admin'
 
   if (!Array.isArray(asins) || asins.length === 0) {
     return res.status(400).json({ error: 'asins (array) is required' })
@@ -2370,7 +2475,7 @@ app.post('/api/products/bulk-add', async (req, res) => {
     _lastDbSync: 0,
   })
 
-  upsertActivityJob(jobId, {
+upsertActivityJob(jobId, {
     job_type: 'bulk_add',
     label: 'Bulk Import',
     total: cleanAsins.length,
@@ -2378,16 +2483,17 @@ app.post('/api/products/bulk-add', async (req, res) => {
     success: 0,
     failed: 0,
     status: 'running',
+    summary: `Requested by ${addedBy}`,
   })
 
   res.status(202).json({ job_id: jobId, total: cleanAsins.length })
 
   // Runs entirely server-side — a browser refresh or closed tab no longer
   // stops the import partway through.
-  runBulkAddChunksSequential(jobId, cleanAsins, supplier_id)
+  runBulkAddChunksSequential(jobId, cleanAsins, supplier_id, addedBy)
 })
 
-async function runBulkAddChunksSequential(jobId, cleanAsins, supplier_id) {
+async function runBulkAddChunksSequential(jobId, cleanAsins, supplier_id, addedBy) {
   const job = bulkJobs.get(jobId)
   if (!job) return
 
@@ -2397,11 +2503,11 @@ async function runBulkAddChunksSequential(jobId, cleanAsins, supplier_id) {
   }
 
   for (const chunk of chunks) {
-    if (job.cancelled) break   // ← check before starting the next chunk
+    if (job.cancelled) break   // ? check before starting the next chunk
 
     await new Promise((resolveChunk) => {
       const child = spawn(PYTHON_BIN, [BULK_ADD_SCRIPT, '--asins', chunk.join(','), '--workers', '10'])
-      job.currentChild = child   // ← track it so cancel can kill it mid-chunk
+      job.currentChild = child   // ? track it so cancel can kill it mid-chunk
       let buffer = ''
 
       const syncToDb = () => {
@@ -2425,30 +2531,37 @@ async function runBulkAddChunksSequential(jobId, cleanAsins, supplier_id) {
 
           if (parsed.status === 'success') {
             job.pendingSaves += 1
-            saveFetchedProductToDb(parsed.data, supplier_id)
-              .then((saveResult) => {
+            ;(async () => {
+              await dbSaveSemaphore.acquire()
+              try {
+                const saveResult = await saveFetchedProductToDb(parsed.data, supplier_id)
                 job.done += 1
                 job.pendingSaves -= 1
                 if (saveResult.status === 'duplicate') {
                   job.failed += 1
                   job.results.push({ asin: parsed.asin, status: 'error', message: 'Already exists', product_id: saveResult.product_id })
+                  bufferJobItem(jobId, { identifier: parsed.asin, status: 'error', message: 'Already exists', product_id: saveResult.product_id })
                 } else {
                   job.success += 1
                   job.results.push({ asin: parsed.asin, status: 'success', title: saveResult.product.title, product_id: saveResult.product.product_id })
+                  bufferJobItem(jobId, { identifier: parsed.asin, status: 'success', title: saveResult.product.title, product_id: saveResult.product.product_id })
                 }
-                syncToDb()
-              })
-              .catch((err) => {
+              } catch (err) {
                 job.done += 1
                 job.pendingSaves -= 1
                 job.failed += 1
                 job.results.push({ asin: parsed.asin, status: 'error', message: err.message })
+                bufferJobItem(jobId, { identifier: parsed.asin, status: 'error', message: err.message })
+              } finally {
+                dbSaveSemaphore.release()
                 syncToDb()
-              })
-          } else {
+              }
+            })()
+           } else {
             job.done += 1
             job.failed += 1
             job.results.push({ asin: parsed.asin, status: 'error', message: parsed.message || 'Failed to fetch' })
+            bufferJobItem(jobId, { identifier: parsed.asin, status: 'error', message: parsed.message || 'Failed to fetch' })
             syncToDb()
           }
         }
@@ -2474,6 +2587,7 @@ async function runBulkAddChunksSequential(jobId, cleanAsins, supplier_id) {
   }
 
   job.childClosed = true
+  await flushJobItems(jobId)
   const finalStatus = job.cancelled ? 'cancelled' : (job.status === 'error' ? 'error' : 'done')
   job.status = finalStatus
 
@@ -2483,10 +2597,11 @@ async function runBulkAddChunksSequential(jobId, cleanAsins, supplier_id) {
     failed: job.failed,
     status: finalStatus,
     finished_at: new Date(),
-    summary: finalStatus === 'cancelled'
+    summary: (finalStatus === 'cancelled'
       ? `Cancelled after ${job.done.toLocaleString()} of ${job.total.toLocaleString()} ASINs`
       : `Imported ${job.success.toLocaleString()} of ${job.total.toLocaleString()} ASINs` +
-        (job.failed ? ` (${job.failed.toLocaleString()} failed)` : ''),
+        (job.failed ? ` (${job.failed.toLocaleString()} failed)` : '')
+    ) + ` — by ${addedBy}`,
   })
 
   setTimeout(() => bulkJobs.delete(jobId), 60 * 60 * 1000)
@@ -2501,6 +2616,8 @@ app.get('/api/products/bulk-add/:jobId', (req, res) => {
 })
 
 // --- ACTIVITY LOG (persisted job history — survives restarts + refreshes) ---
+// Per-item results for one job — paginated, filterable by status, searchable
+// by SKU/ASIN. Backs the "View details" modal.
 app.get('/api/activity', async (req, res) => {
   try {
     const { status, limit = 50 } = req.query
@@ -2513,6 +2630,49 @@ app.get('/api/activity', async (req, res) => {
       [...params, parseInt(limit)]
     )
     res.json(rows)
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+app.get('/api/activity/:jobId/items', async (req, res) => {
+  try {
+    const { jobId } = req.params
+    const { page = 0, limit = 50, status, search } = req.query
+    const offset = parseInt(page) * parseInt(limit)
+
+    const conditions = ['job_id = ?']
+    const params = [jobId]
+    if (status === 'success' || status === 'error') {
+      conditions.push('status = ?')
+      params.push(status)
+    }
+    if (search) {
+      conditions.push('(identifier LIKE ? OR title LIKE ?)')
+      params.push(`%${search}%`, `%${search}%`)
+    }
+    const where = conditions.join(' AND ')
+
+    const [rows] = await pool.query(
+      `SELECT id, identifier, status, title, product_id, message, created_at
+       FROM activity_job_items WHERE ${where}
+       ORDER BY id ASC LIMIT ? OFFSET ?`,
+      [...params, parseInt(limit), offset]
+    )
+    const [[{ total }]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM activity_job_items WHERE ${where}`, params
+    )
+    const [[counts]] = await pool.query(
+      `SELECT
+         SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count,
+         SUM(CASE WHEN status = 'error'   THEN 1 ELSE 0 END) AS error_count
+       FROM activity_job_items WHERE job_id = ?`,
+      [jobId]
+    )
+
+    res.json({
+      data: rows,
+      count: total,
+      success_count: counts.success_count || 0,
+      error_count: counts.error_count || 0,
+    })
   } catch (e) { res.status(500).json({ error: e.message }) }
 })
 const server = app.listen(process.env.PORT || 3001, () => {
@@ -3028,8 +3188,8 @@ app.get('/api/products/bulk-job/:jobId', (req, res) => {
 // DELETE many products at once (background job)
 app.post('/api/products/bulk-delete', async (req, res) => {
   try {
-    const { product_ids, select_all, filters } = req.body || {}
- 
+    const { product_ids, select_all, filters, deleted_by } = req.body || {}
+    const deletedBy = deleted_by || 'shared_admin'
     let where, params
     if (select_all) {
       ;({ where, params } = buildWhere(filters || {}))
@@ -3052,6 +3212,15 @@ app.post('/api/products/bulk-delete', async (req, res) => {
     const jobId = makeActionJobId('del')
     bulkActionJobs.set(jobId, { type: 'delete', total, done: 0, status: 'running', startedAt: new Date().toISOString() })
     res.status(202).json({ job_id: jobId, total })
+
+    upsertActivityJob(jobId, {
+      job_type: 'bulk_delete',
+      label: 'Delete Products',
+      total,
+      done: 0,
+      status: 'running',
+      summary: `Requested by ${deletedBy}`,
+    })
  
     // --- background work: batch through matching rows so a 700k-row
     // "select all" doesn't hold one giant transaction or time out ---
@@ -3083,13 +3252,27 @@ app.post('/api/products/bulk-delete', async (req, res) => {
           await pool.query(`DELETE FROM products WHERE product_id IN (${idPlaceholders})`, ids)
 
           job.done += ids.length
+          upsertActivityJob(jobId, { done: job.done })
           if (rows.length < BATCH) break
         }
         job.status = 'done'
+        upsertActivityJob(jobId, {
+          done: job.done,
+          status: 'done',
+          finished_at: new Date(),
+          summary: `Deleted ${job.done.toLocaleString()} of ${total.toLocaleString()} products — by ${deletedBy}`,
+        })
       } catch (e) {
         console.error(`bulk-delete job ${jobId} failed:`, e.message)
         job.status = 'error'
         job.error = e.message
+        upsertActivityJob(jobId, {
+          done: job.done,
+          status: 'error',
+          error: e.message,
+          finished_at: new Date(),
+          summary: `Stopped after ${job.done.toLocaleString()} of ${total.toLocaleString()} — ${e.message}`,
+        })
       } finally {
         setTimeout(() => bulkActionJobs.delete(jobId), 60 * 60 * 1000)
       }

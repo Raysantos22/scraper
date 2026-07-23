@@ -5,11 +5,12 @@ export async function exportProductsCsv({
   filterSupplier: supplierId, filterCategory: category, filterStock: stock,
   search, filterMinQty: minQty, filterMinPrice: minPrice, filterMaxPrice: maxPrice,
   filterOverride,
-} = {}) {
+} = {}, onProgress = () => {}) {
   let allProducts = [], page = 0
   const LIMIT = 1000
 
   // 1. Fetch all matching products (paginated)
+  onProgress({ stage: 'products', done: 0, total: null })
   while (true) {
     const params = new URLSearchParams({
       page, limit: LIMIT,
@@ -27,6 +28,7 @@ export async function exportProductsCsv({
     const res = await api.get(`/api/products?${params}`)
     if (!res?.data?.length) break
     allProducts = [...allProducts, ...res.data]
+    onProgress({ stage: 'products', done: allProducts.length, total: res.count || null })
     if (allProducts.length >= res.count) break
     page++
   }
@@ -34,24 +36,33 @@ export async function exportProductsCsv({
   if (!allProducts.length) return
 
   // 2. Fetch all override SKUs
-const allSkus = allProducts.map(p => p.sku)
+  onProgress({ stage: 'overrides', done: 0, total: null })
+  const allSkus = allProducts.map(p => p.sku)
   let overridesBySku = {}
   try {
     const result = await api.post('/api/product-overrides/bulk-get', { skus: allSkus })
     if (result && !result.error) overridesBySku = result
   } catch {}
 
-  // 3. Fetch variants for variation_parent products
+  // 3. Fetch variants for variation_parent products — one bulk call instead
+  // of one request per parent. On large exports (thousands of variation
+  // parents) this is the difference between ~40 requests and ~40,000, and
+  // avoids net::ERR_INSUFFICIENT_RESOURCES from opening too many sockets
+  // at once.
   const parentIds = allProducts.filter(p => p.product_type === 'variation_parent').map(p => p.product_id)
   let variantsByParent = {}
-  await Promise.all(
-    parentIds.map(async id => {
-      try {
-        const vs = await api.get(`/api/variants?product_id=${id}`)
-        if (vs?.length) variantsByParent[id] = vs
-      } catch {}
-    })
-  )
+  const BULK_VARIANTS_CHUNK = 5000
+  onProgress({ stage: 'variants', done: 0, total: parentIds.length })
+  for (let i = 0; i < parentIds.length; i += BULK_VARIANTS_CHUNK) {
+    const slice = parentIds.slice(i, i + BULK_VARIANTS_CHUNK)
+    try {
+      const grouped = await api.post('/api/variants/bulk', { product_ids: slice })
+      Object.assign(variantsByParent, grouped)
+    } catch {}
+    onProgress({ stage: 'variants', done: Math.min(i + BULK_VARIANTS_CHUNK, parentIds.length), total: parentIds.length })
+  }
+
+  onProgress({ stage: 'building', done: 0, total: allProducts.length })
 
   // 4. Helper: safely parse images
   const safeParseImages = raw => {
@@ -73,14 +84,22 @@ const allSkus = allProducts.map(p => p.sku)
   })
 
   // 6. Build headers
-  const productHeaders = Object.keys(allProducts[0])
+  const productHeaders = Object.keys(allProducts[0]).filter(h => h !== 'metadata')
   const variantOnlyFields = [
     'variant_id', 'variant_sku', 'variant_name',
     'option1_name', 'option1_value', 'option2_name', 'option2_value',
     'option3_name', 'option3_value',
   ]
+  const metadataFields = ['ean', 'upc', 'isbn', 'condition', 'merchant_name', 'item_length', 'item_width', 'item_height', 'item_length_unit']
   const extraHeaders = variantOnlyFields.filter(f => !productHeaders.includes(f))
-  const allHeaders = [...productHeaders, ...extraHeaders, 'has_override', 'row_type', 'parent_product_id']
+  const allHeaders = [...productHeaders, ...metadataFields, ...extraHeaders, 'has_override', 'row_type', 'parent_product_id']
+
+  // Safely parse metadata JSON (string from DB, or already-object)
+  const safeParseMetadata = raw => {
+    if (raw && typeof raw === 'object') return raw
+    if (typeof raw === 'string') { try { return JSON.parse(raw) } catch { return {} } }
+    return {}
+  }
 
   // 7. CSV escape helper
   const esc = v => {
@@ -93,6 +112,8 @@ const allSkus = allProducts.map(p => p.sku)
 
   // 8. Build rows
   const rows = []
+  let builtCount = 0
+  const BUILD_PROGRESS_EVERY = 2000
   for (const product of mergedProducts) {
     const isParent    = product.product_type === 'variation_parent'
     const hasOverride = !!overridesBySku[product.sku]
@@ -102,6 +123,10 @@ const allSkus = allProducts.map(p => p.sku)
       if (h === 'parent_product_id') return ''
       if (h === 'has_override')      return esc(hasOverride ? 'yes' : 'no')
       if (h === 'images')            return esc(safeParseImages(product.images))
+      if (metadataFields.includes(h)) {
+        const meta = safeParseMetadata(product.metadata)
+        return esc(meta[h] ?? (meta.dimensions ? meta.dimensions[h.replace('item_', '').replace('_unit', 'unit')] : '') ?? '')
+      }
       if (extraHeaders.includes(h))  return ''
       return esc(product[h])
     })
@@ -132,14 +157,25 @@ const allSkus = allProducts.map(p => p.sku)
           if (h === 'option2_value')     return esc(v.option2_value)
           if (h === 'option3_name')      return esc(v.option3_name)
           if (h === 'option3_value')     return esc(v.option3_value)
+          if (metadataFields.includes(h)) {
+            const meta = safeParseMetadata(v.metadata ?? product.metadata)
+            return esc(meta[h] ?? (meta.dimensions ? meta.dimensions[h.replace('item_', '').replace('_unit', 'unit')] : '') ?? '')
+          }
           return esc(product[h] ?? '')
         })
         rows.push(childRow)
       }
     }
+
+    builtCount++
+    if (builtCount % BUILD_PROGRESS_EVERY === 0) {
+      onProgress({ stage: 'building', done: builtCount, total: mergedProducts.length })
+    }
   }
+  onProgress({ stage: 'building', done: mergedProducts.length, total: mergedProducts.length })
 
   // 9. Download
+  onProgress({ stage: 'downloading', done: rows.length, total: rows.length })
   const csv  = [allHeaders.join(','), ...rows.map(r => r.join(','))].join('\n')
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
   const url  = URL.createObjectURL(blob)
