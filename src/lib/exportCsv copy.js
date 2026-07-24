@@ -473,7 +473,72 @@ function parseVariationAttrs(attrString) {
   }
   return options
 }
+const PUSH_EBAY_SCRIPT = '/home/emega/client/ozhair/scraper/ebay/push_ebay_update.py'
 
+function runPushEbayScript(payload) {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      PYTHON_BIN,
+      [PUSH_EBAY_SCRIPT],
+      { timeout: 30000 },
+      (err, stdout, stderr) => {
+        if (stderr) console.log('[push_ebay_update.py]', stderr.trim())
+        try {
+          const result = JSON.parse(stdout.trim())
+          if (result.status === 'error') return reject(new Error(result.message))
+          resolve(result)
+        } catch {
+          reject(new Error(err ? err.message : 'Could not parse push script output'))
+        }
+      }
+    )
+    child.stdin.write(JSON.stringify(payload))
+    child.stdin.end()
+  })
+}
+
+app.post('/api/ebay/listings/push-live', async (req, res) => {
+  try {
+    const { store_name, sku, title, description, images, price, quantity, edited_by } = req.body || {}
+    if (!store_name || !sku) {
+      return res.status(400).json({ error: 'store_name and sku are required' })
+    }
+
+    await runPushEbayScript({ store_name, sku, title, description, images, price, quantity })
+
+    // Reflect locally right away so the dashboard shows it without waiting
+    // for the next snapshot run
+    const setClauses = []
+    const params = []
+    if (title !== undefined)       { setClauses.push('title = ?');       params.push(title) }
+    if (description !== undefined) { setClauses.push('description = ?'); params.push(description) }
+    if (images !== undefined)      { setClauses.push('images = ?');      params.push((images || []).join('|')) }
+    if (price !== undefined)       { setClauses.push('price = ?');       params.push(price) }
+    if (quantity !== undefined)    { setClauses.push('quantity = ?');    params.push(quantity) }
+
+    if (setClauses.length) {
+      params.push(store_name, sku)
+      await pool.query(
+        `UPDATE ebay_current SET ${setClauses.join(', ')} WHERE store_name = ? AND sku = ?`,
+        params
+      )
+    }
+
+    const editJobId = `pushlive_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    upsertActivityJob(editJobId, {
+      job_type: 'ebay_push_live',
+      label: 'eBay Live Edit',
+      total: 1, done: 1, success: 1, failed: 0,
+      status: 'done',
+      summary: `SKU ${sku} pushed live by ${edited_by || 'shared_admin'}`,
+      finished_at: new Date(),
+    })
+
+    res.json({ success: true })
+  } catch (e) {
+    res.status(502).json({ error: e.message })
+  }
+})
 // POST /api/products/add   { asin, supplier_id }
 // Which Amazon account is used to fetch is picked automatically inside
 // fetch_single_product.py ï¿½ no dropdown needed for that on the frontend.

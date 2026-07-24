@@ -30,6 +30,11 @@ function fmtDate(d) {
   return dt.toLocaleString('en-AU', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
+function stripHtml(html) {
+  if (!html) return ''
+  return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500)
+}
+
 function QtyBadge({ qty }) {
   const q = Number(qty || 0)
   if (q === 0) return (
@@ -58,9 +63,36 @@ function StatCard({ label, value, icon: Icon, loading }) {
   )
 }
 
-const ListingRow = React.memo(function ListingRow({ listing }) {
+function ListingImage({ images, title }) {
+  const url = images ? images.split('|')[0] : null
+  if (!url) {
+    return (
+      <div className="w-10 h-10 rounded-md bg-gray-100 flex items-center justify-center shrink-0">
+        <Package size={14} className="text-gray-300" />
+      </div>
+    )
+  }
   return (
-    <tr className="border-b border-gray-50 hover:bg-gray-50/60 transition-colors group">
+    <img
+      src={url}
+      alt={title || ''}
+      loading="lazy"
+      className="w-10 h-10 rounded-md object-cover border border-gray-100 shrink-0 bg-white"
+      onError={e => { e.currentTarget.style.display = 'none' }}
+    />
+  )
+}
+
+const ListingRow = React.memo(function ListingRow({ listing, onClick }) {
+  const tooltip = listing.description ? stripHtml(listing.description) : (listing.title || '')
+  return (
+    <tr
+      onClick={onClick}
+      className="border-b border-gray-50 hover:bg-gray-50/60 transition-colors group cursor-pointer"
+    >
+      <td className="px-2 py-3">
+        <ListingImage images={listing.images} title={listing.title} />
+      </td>
       <td className="px-4 py-3">
         <p className="font-mono text-xs text-gray-700 truncate font-medium">{listing.sku}</p>
         {listing.group_sku && (
@@ -84,6 +116,11 @@ const ListingRow = React.memo(function ListingRow({ listing }) {
         ) : <span className="text-gray-300 text-xs">—</span>}
       </td>
       <td className="px-4 py-3">
+        <p className="text-xs text-gray-700 truncate max-w-[260px]" title={tooltip}>
+          {listing.title || '—'}
+        </p>
+      </td>
+      <td className="px-4 py-3">
         <span className="text-sm font-semibold text-gray-900">${parseFloat(listing.price || 0).toFixed(2)}</span>
       </td>
       <td className="px-4 py-3"><QtyBadge qty={listing.quantity} /></td>
@@ -93,7 +130,7 @@ const ListingRow = React.memo(function ListingRow({ listing }) {
   )
 })
 
-export default function StoreListingsPage({ storeName, onBack }) {
+export default function StoreListingsPage({ storeName, onBack, onEditListing }) {
   const [listings,     setListings]     = useState([])
   const [loading,      setLoading]      = useState(true)
   const [statsLoading, setStatsLoading] = useState(true)
@@ -105,7 +142,7 @@ export default function StoreListingsPage({ storeName, onBack }) {
   const [stockFilter,  setStockFilter]  = useState('')
   const [searchInput,  setSearchInput]  = useState('')
   const [search,       setSearch]       = useState('')
-  const [exporting,    setExporting]    = useState(false)   // ← NEW
+  const [exporting,    setExporting]    = useState(false)
 
   // Debounce search
   useEffect(() => {
@@ -117,14 +154,13 @@ export default function StoreListingsPage({ storeName, onBack }) {
   useEffect(() => { setPage(0) }, [search, stockFilter])
 
   // ── Export all rows for this store (honours current filters) ─────────────
-  const handleExport = useCallback(async () => {                             // ← NEW
+  const handleExport = useCallback(async () => {
     setExporting(true)
     try {
       const params = new URLSearchParams({ store_name: storeName })
       if (search)      params.set('search', search)
       if (stockFilter) params.set('stock',  stockFilter)
 
-      // Hit the CSV endpoint directly — let the browser trigger the download
       const baseUrl = import.meta.env.VITE_API_URL || ''
       const url     = `${baseUrl}/api/ebay/listings/export?${params}`
       const a       = document.createElement('a')
@@ -212,8 +248,23 @@ export default function StoreListingsPage({ storeName, onBack }) {
   useEffect(() => { fetchStats() }, [fetchStats])
   useEffect(() => { fetchPage()  }, [fetchPage])
 
+  // Invalidate caches for this store when the user comes back from editing a
+  // listing, so a pushed-live edit shows up immediately instead of waiting
+  // out the 1 min stale window.
+  function invalidateCaches() {
+    for (const key of PAGE_CACHE.keys())  { if (key.startsWith(`${storeName}|`)) PAGE_CACHE.delete(key) }
+    for (const key of STATS_CACHE.keys()) { if (key.startsWith(`${storeName}|`)) STATS_CACHE.delete(key) }
+  }
+
+  function handleRowClick(sku) {
+    if (!onEditListing) return
+    onEditListing(sku, invalidateCaches)
+  }
+
   const pageCount  = Math.ceil(totalCount / PAGE_SIZE)
   const hasFilters = search || stockFilter
+
+  const TABLE_HEADERS = ['', 'SKU', 'Origin SKU', 'AutoDS ID', 'Item ID', 'Title', 'Price', 'Status', 'OOS Since', 'Snapshot']
 
   return (
     <div>
@@ -268,7 +319,6 @@ export default function StoreListingsPage({ storeName, onBack }) {
             </select>
           </div>
 
-          {/* ── Export button ── */}
           <button
             onClick={handleExport}
             disabled={exporting || totalCount === 0}
@@ -293,17 +343,17 @@ export default function StoreListingsPage({ storeName, onBack }) {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50">
-                  {['SKU', 'Origin SKU', 'AutoDS ID', 'Item ID', 'Price', 'Status', 'OOS Since', 'Snapshot'].map(h => (
-                    <th key={h} className="text-left px-4 py-3 text-xs text-gray-400 font-medium">{h}</th>
+                  {TABLE_HEADERS.map((h, i) => (
+                    <th key={i} className="text-left px-4 py-3 text-xs text-gray-400 font-medium">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {Array.from({ length: 12 }).map((_, i) => (
                   <tr key={i} className="border-b border-gray-50">
-                    {[4, 3, 2, 5, 3].map((w, j) => (
+                    {[2, 4, 3, 2, 5, 5, 3, 3, 2, 2].map((w, j) => (
                       <td key={j} className="px-4 py-3">
-                        <div className="h-3 bg-gray-100 rounded animate-pulse" style={{ width: `${w * 15}%` }} />
+                        <div className="h-3 bg-gray-100 rounded animate-pulse" style={{ width: `${w * 10}%` }} />
                       </td>
                     ))}
                   </tr>
@@ -328,20 +378,23 @@ export default function StoreListingsPage({ storeName, onBack }) {
           <div className="border border-gray-100 rounded-xl overflow-hidden">
             <table className="w-full text-xs table-fixed">
               <colgroup>
-                <col style={{ width: '18%' }} /><col style={{ width: '12%' }} />
-                <col style={{ width: '14%' }} /><col style={{ width: '14%' }} />
-                <col style={{ width: '10%' }} /><col style={{ width: '12%' }} />
-                <col style={{ width: '10%' }} /><col style={{ width: '10%' }} />
+                <col style={{ width: '6%' }} />  <col style={{ width: '13%' }} />
+                <col style={{ width: '9%' }} />  <col style={{ width: '9%' }} />
+                <col style={{ width: '9%' }} />  <col style={{ width: '16%' }} />
+                <col style={{ width: '7%' }} />  <col style={{ width: '10%' }} />
+                <col style={{ width: '9%' }} />  <col style={{ width: '9%' }} />
               </colgroup>
               <thead>
                 <tr className="border-b border-gray-100 bg-gray-50">
-                  {['SKU', 'Origin SKU', 'AutoDS ID', 'Item ID', 'Price', 'Status', 'OOS Since', 'Snapshot'].map(h => (
-                    <th key={h} className="text-left px-4 py-3 text-xs text-gray-400 font-medium">{h}</th>
+                  {TABLE_HEADERS.map((h, i) => (
+                    <th key={i} className="text-left px-4 py-3 text-xs text-gray-400 font-medium">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {listings.map(listing => <ListingRow key={listing.id} listing={listing} />)}
+                {listings.map(listing => (
+                  <ListingRow key={listing.id} listing={listing} onClick={() => handleRowClick(listing.sku)} />
+                ))}
               </tbody>
             </table>
           </div>

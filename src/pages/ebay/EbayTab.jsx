@@ -22,6 +22,7 @@ import BannedSkusPage    from '../ebay/BannedSkusPage'
 import SkuLookupPage     from '../ebay/SkuLookupPage'
 import StoreLimitsPage   from '../ebay/StoreLimitsPage'
 import ActiveHealthPage from '../ebay/ActiveHealthPage'
+import EbayListingEditPage from '../ebay/EbayListingEditPage'   // ← add this line
 
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
@@ -882,6 +883,7 @@ export default function StoresTab() {
   const [loading,        setLoading]        = useState(!STORES_CACHE.data)
   const [lastSynced,     setLastSynced]     = useState({ ebay: null, autods: null })
   const [selectedStore,  setSelectedStore]  = useState(null)
+  const [editingListing, setEditingListing] = useState(null) // { storeName, sku, invalidateCaches }
   const [showBanned,     setShowBanned]     = useState(false)
   const [bannedStore,    setBannedStore]    = useState(null)
   const [bannedTotal,    setBannedTotal]    = useState(0)
@@ -1022,7 +1024,21 @@ const activeStoreCount = stores.filter(s => Number(s.total_items || 0) > 0).leng
   const storeCols = filteredStores.length === 1 ? 1 : filteredStores.length >= 5 ? 3 : 2
 
   // ── Page-level navigation guards ──
-  if (selectedStore)  return <StoreListingsPage storeName={selectedStore} onBack={() => setSelectedStore(null)} />
+ if (editingListing) return (
+  <EbayListingEditPage
+    storeName={editingListing.storeName}
+    sku={editingListing.sku}
+    onBack={() => { editingListing.invalidateCaches?.(); setEditingListing(null) }}
+    onSaved={() => editingListing.invalidateCaches?.()}
+  />
+)
+if (selectedStore) return (
+  <StoreListingsPage
+    storeName={selectedStore}
+    onBack={() => setSelectedStore(null)}
+    onEditListing={(sku, invalidateCaches) => setEditingListing({ storeName: selectedStore, sku, invalidateCaches })}
+  />
+)
   if (showBanned)     return <BannedSkusPage initialStore={bannedStore} onBack={() => { setShowBanned(false); setBannedStore(null); STORES_CACHE.ts = 0 }} />
   if (showSkuLookup)  return <SkuLookupPage onBack={() => setShowSkuLookup(false)} />
   if (showLimitsPage) return <StoreLimitsPage onBack={() => setShowLimitsPage(false)} />
